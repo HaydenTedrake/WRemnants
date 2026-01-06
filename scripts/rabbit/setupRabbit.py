@@ -2859,9 +2859,9 @@ if __name__ == "__main__":
         )
 
         if len(args.fitresult) > 1:
-            physics_model = args.fitresult[1]
+            mapping = args.fitresult[1]
         else:
-            physics_model = "Basemodel"
+            mapping = "BaseMapping"
 
         if len(args.fitresult) > 2:
             channels = args.fitresult[2:]
@@ -2870,7 +2870,7 @@ if __name__ == "__main__":
 
         fitresult_hist, fitresult_cov, fitresult_channels = (
             rabbit.io_tools.get_postfit_hist_cov(
-                fitresult, physics_model=physics_model, channels=channels
+                fitresult, mapping=mapping, channels=channels
             )
         )
 
