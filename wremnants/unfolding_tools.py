@@ -242,22 +242,18 @@ def add_xnorm_histograms(
     return df_xnorm
 
 
-def reweight_to_fitresult(
-    filename, result=None, physics_model="", channel="ch0_masked"
-):
+def reweight_to_fitresult(filename, result=None, mapping="", channel="ch0_masked"):
     import wums.boostHistHelpers as hh
     from rabbit.io_tools import get_fitresult
 
     fitresult, meta = get_fitresult(filename[0], result, meta=True)
-    results = fitresult["physics_models"][physics_model]["channels"][channel]
+    results = fitresult["mappings"][mapping]["channels"][channel]
 
     hPostfit = results[f"hist_postfit_inclusive"].get()
 
     if len(filename) == 2:
         fitresult_den, meta_den = get_fitresult(filename[1], result, meta=True)
-        results_den = fitresult_den["physics_models"][physics_model]["channels"][
-            channel
-        ]
+        results_den = fitresult_den["mappings"][mapping]["channels"][channel]
         hPrefit = results_den[f"hist_prefit_inclusive"].get()
     else:
         hPrefit = results[f"hist_prefit_inclusive"].get()
@@ -326,7 +322,7 @@ class UnfolderZ:
         unfolding_levels=None,
         poi_as_noi=True,
         fitresult=None,
-        fitresult_physics_model=f"Select",
+        fitresult_mapping=f"Select",
         fitresult_channel="ch0_masked",
         low_pu=False,
     ):
@@ -405,7 +401,7 @@ class UnfolderZ:
         self.unfolding_corr_helper = (
             reweight_to_fitresult(
                 fitresult,
-                physics_model=fitresult_physics_model,
+                mapping=fitresult_mapping,
                 channel=fitresult_channel,
             )
             if fitresult is not None
