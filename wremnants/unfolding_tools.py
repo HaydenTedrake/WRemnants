@@ -242,7 +242,9 @@ def add_xnorm_histograms(
     return df_xnorm
 
 
-def reweight_to_fitresult(filename, result=None, mapping="", channel="ch0_masked"):
+def reweight_to_fitresult(
+    filename, result=None, mapping="Select", channel="ch0_masked"
+):
     import wums.boostHistHelpers as hh
     from rabbit.io_tools import get_fitresult
 
