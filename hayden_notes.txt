@@ -55,12 +55,14 @@ python /work/submit/hayden17/muonscarekit/code/python/tools/compute_quantiles.py
 python scripts/rabbit/new_make_tensor.py \
     mz_5TeV_scetlib_dyturbo_LatticeNP_CT18Z_N3p0LL_N2LO_pdfas_Corr.hdf5 \
     -o /tmp/rabbit_test/ \
-    --outname my_tensor \
+    --outname my_tensor_data \
     --histName ptll \
-    --procFilters Zmumu
+    --procFilters Zmumu \
+    --realData
 
-rabbit_fit.py /tmp/rabbit_test/my_tensor.hdf5 \
+rabbit_fit.py /tmp/rabbit_test/my_tensor_data.hdf5 \
     -o /tmp/rabbit_test/ \
+    --postfix data \
     -t 0 \
     --unblind \
     --doImpacts \
@@ -69,32 +71,31 @@ rabbit_fit.py /tmp/rabbit_test/my_tensor.hdf5 \
     --computeHistErrors \
     --computeVariation
 
-IN=/tmp/rabbit_test/fitresults.hdf5
 OUT=~/public_html/
-TAG=jun5
-PROCS="Data Zmumu"
-
+TAG=jul{date}
 mkdir -p $OUT/$TAG
 
 rabbit_plot_hists.py /tmp/rabbit_test/fitresults.hdf5 \
     -o $OUT/$TAG \
-    -m Basemodel \
+    -m BaseMapping \
+    --postfix MC \
     --varNames pdfAlphaS pdf1_pdf2 pdf3_pdf4 pdf5_pdf6 pdf7_pdf8 pdf9_pdf10 pdf11_pdf12 pdf13_pdf14 pdf15_pdf16 pdf17_pdf18 pdf19_pdf20 pdf21_pdf22 pdf23_pdf24 pdf25_pdf26 pdf27_pdf28 pdf29_pdf30 pdf31_pdf32 pdf33_pdf34 pdf35_pdf36 pdf37_pdf38 pdf39_pdf40 pdf41_pdf42 pdf43_pdf44 pdf45_pdf46 pdf47_pdf48 pdf49_pdf50 pdf51_pdf52 pdf53_pdf54 pdf55_pdf56 pdf57_pdf58 \
-    --rrange 0.995 1.005
+    --rrange 0.95 1.05
 
-rabbit_plot_hists.py /tmp/rabbit_test/fitresults.hdf5 \
+rabbit_plot_hists.py /tmp/rabbit_test/fitresult_data.hdf5 \
     -o $OUT/$TAG \
-    -m Basemodel \
+    -m BaseMapping \
     --postfix important \
     --varNames pdfAlphaS pdf29_pdf30 pdf51_pdf52 \
     --rrange 0.975 1.025
 
 rabbit_plot_pulls_and_impacts.py /tmp/rabbit_test/fitresults.hdf5 \
-    -o $OUT/$TAG
+    -o $OUT/$TAG \
+    --postfix MC
 
     can add --result toy1
 
-rabbit_print_pulls_and_constraints.py /tmp/rabbit_test/fitresults.hdf5
+rabbit_print_pulls_and_constraints.py /tmp/rabbit_test/fitresults_data.hdf5
 
 # from january
    Parameter                        pull +/- constraint (pull prefit +/- constraint prefit)
@@ -164,14 +165,72 @@ rabbit_print_pulls_and_constraints.py /tmp/rabbit_test/fitresults.hdf5
    pdf55_pdf56                       0.0 +/-    0.92909 (        0.0 +/-               1.0)
    pdf57_pdf58                       0.0 +/-    0.86107 (        0.0 +/-               1.0)
 
+# from july
+   Parameter                        pull +/- constraint (pull prefit +/- constraint prefit)
+   ----------------------------------------------------------------------------------------------------
+   pdfAlphaS                         0.0 +/-    0.37423 (        0.0 +/-               0.0)
+   pdf1_pdf2                         0.0 +/-    0.99425 (        0.0 +/-               1.0)
+   pdf3_pdf4                         0.0 +/-    0.97887 (        0.0 +/-               1.0)
+   pdf5_pdf6                         0.0 +/-    0.95585 (        0.0 +/-               1.0)
+   pdf7_pdf8                         0.0 +/-    0.99697 (        0.0 +/-               1.0)
+   pdf9_pdf10                        0.0 +/-    0.97572 (        0.0 +/-               1.0)
+   pdf11_pdf12                       0.0 +/-     0.9406 (        0.0 +/-               1.0)
+   pdf13_pdf14                       0.0 +/-     0.9794 (        0.0 +/-               1.0)
+   pdf15_pdf16                       0.0 +/-    0.99307 (        0.0 +/-               1.0)
+   pdf17_pdf18                       0.0 +/-    0.97268 (        0.0 +/-               1.0)
+   pdf19_pdf20                       0.0 +/-    0.93967 (        0.0 +/-               1.0)
+   pdf21_pdf22                       0.0 +/-    0.97248 (        0.0 +/-               1.0)
+   pdf23_pdf24                       0.0 +/-    0.96885 (        0.0 +/-               1.0)
+   pdf25_pdf26                       0.0 +/-     0.9029 (        0.0 +/-               1.0)
+   pdf27_pdf28                       0.0 +/-    0.92985 (        0.0 +/-               1.0)
+   pdf29_pdf30                       0.0 +/-    0.93926 (        0.0 +/-               1.0)
+   pdf31_pdf32                       0.0 +/-    0.92292 (        0.0 +/-               1.0)
+   pdf33_pdf34                       0.0 +/-    0.97154 (        0.0 +/-               1.0)
+   pdf35_pdf36                       0.0 +/-    0.97143 (        0.0 +/-               1.0)
+   pdf37_pdf38                       0.0 +/-    0.95029 (        0.0 +/-               1.0)
+   pdf39_pdf40                       0.0 +/-    0.93935 (        0.0 +/-               1.0)
+   pdf41_pdf42                       0.0 +/-    0.96215 (        0.0 +/-               1.0)
+   pdf43_pdf44                       0.0 +/-    0.82926 (        0.0 +/-               1.0)
+   pdf45_pdf46                       0.0 +/-    0.92436 (        0.0 +/-               1.0)
+   pdf47_pdf48                       0.0 +/-    0.92895 (        0.0 +/-               1.0)
+   pdf49_pdf50                       0.0 +/-    0.86649 (        0.0 +/-               1.0)
+   pdf51_pdf52                       0.0 +/-    0.79464 (        0.0 +/-               1.0)
+   pdf53_pdf54                       0.0 +/-    0.95406 (        0.0 +/-               1.0)
+   pdf55_pdf56                       0.0 +/-    0.92903 (        0.0 +/-               1.0)
+   pdf57_pdf58                       0.0 +/-    0.86022 (        0.0 +/-               1.0)
 
-
-git branch notes
-git worktree add ../wremnants-notes notes
-cp hayden_notes.txt ../wremnants-notes/
-cd ../wremnants-notes
-git add hayden_notes.txt
-git commit -m "track my notes"
-git push origin notes
+# from july (DATA)
+   Parameter                        pull +/- constraint (pull prefit +/- constraint prefit)
+   ----------------------------------------------------------------------------------------------------
+   pdfAlphaS                      -4.80977 +/-    1.09957 (        0.0 +/-               0.0)
+   pdf1_pdf2                      -0.06028 +/-    0.99533 (        0.0 +/-               1.0)
+   pdf3_pdf4                      -0.59867 +/-    0.98806 (        0.0 +/-               1.0)
+   pdf5_pdf6                      -0.03322 +/-    0.97189 (        0.0 +/-               1.0)
+   pdf7_pdf8                      -0.23702 +/-    0.99831 (        0.0 +/-               1.0)
+   pdf9_pdf10                     0.77018 +/-    0.98581 (        0.0 +/-               1.0)
+   pdf11_pdf12                    0.31656 +/-     0.9458 (        0.0 +/-               1.0)
+   pdf13_pdf14                    -0.0198 +/-    0.99769 (        0.0 +/-               1.0)
+   pdf15_pdf16                    0.27796 +/-    0.99682 (        0.0 +/-               1.0)
+   pdf17_pdf18                    -0.42198 +/-    0.98358 (        0.0 +/-               1.0)
+   pdf19_pdf20                    -1.06708 +/-    0.95743 (        0.0 +/-               1.0)
+   pdf21_pdf22                    0.24523 +/-    0.98175 (        0.0 +/-               1.0)
+   pdf23_pdf24                     0.473 +/-    0.98769 (        0.0 +/-               1.0)
+   pdf25_pdf26                    -0.6865 +/-    0.91329 (        0.0 +/-               1.0)
+   pdf27_pdf28                    0.33584 +/-    0.95625 (        0.0 +/-               1.0)
+   pdf29_pdf30                    -0.50292 +/-    0.96354 (        0.0 +/-               1.0)
+   pdf31_pdf32                    -0.17393 +/-    0.96764 (        0.0 +/-               1.0)
+   pdf33_pdf34                    0.44315 +/-     0.9849 (        0.0 +/-               1.0)
+   pdf35_pdf36                    -0.36915 +/-    0.97974 (        0.0 +/-               1.0)
+   pdf37_pdf38                    0.26792 +/-    0.98183 (        0.0 +/-               1.0)
+   pdf39_pdf40                    0.48776 +/-    0.95743 (        0.0 +/-               1.0)
+   pdf41_pdf42                    -0.19904 +/-    0.97464 (        0.0 +/-               1.0)
+   pdf43_pdf44                    -1.21451 +/-    0.86193 (        0.0 +/-               1.0)
+   pdf45_pdf46                    -0.94178 +/-    0.96218 (        0.0 +/-               1.0)
+   pdf47_pdf48                    0.42516 +/-     0.9365 (        0.0 +/-               1.0)
+   pdf49_pdf50                    1.42105 +/-    0.89878 (        0.0 +/-               1.0)
+   pdf51_pdf52                    -0.79774 +/-    0.90191 (        0.0 +/-               1.0)
+   pdf53_pdf54                    -0.20469 +/-     0.9792 (        0.0 +/-               1.0)
+   pdf55_pdf56                    -0.96165 +/-    0.94352 (        0.0 +/-               1.0)
+   pdf57_pdf58                    -1.9847 +/-    0.90271 (        0.0 +/-               1.0)
 
 cp hayden_notes.txt ../wremnants-notes/ && git -C ../wremnants-notes commit -am "update notes" && git -C ../wremnants-notes push
