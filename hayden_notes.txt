@@ -234,3 +234,88 @@ rabbit_print_pulls_and_constraints.py /tmp/rabbit_test/fitresults_data.hdf5
    pdf57_pdf58                    -1.9847 +/-    0.90271 (        0.0 +/-               1.0)
 
 cp hayden_notes.txt ../wremnants-notes/ && git -C ../wremnants-notes commit -am "update notes" && git -C ../wremnants-notes push
+
+
+
+
+
+Here's the full sequence, copy-pasteable from /work/submit/hayden17/WRemnants inside your Singularity shell (after source setup.sh):
+
+1. Histmaker (already done today â output exists; rerun only if you change something):
+python scripts/histmakers/mz_5TeV.py \
+    --dataPath /scratch/submit/cms/wmass/NanoAOD/ \
+    --theoryCorr scetlib_dyturbo_LatticeNP_CT18Z_N3p0LL_N2LO \
+                 scetlib_dyturbo_LatticeNP_CT18Z_N3p0LL_N2LO_pdfas \
+                 scetlib_dyturbo_LatticeNP_CT18Z_N3p0LL_N2LO_pdfvars \
+    --muonCorr scarekit
+# -> mz_5TeV_scetlib_dyturbo_LatticeNP_CT18Z_N3p0LL_N2LO_Corr.hdf5  (no --filterProcs: runs all processes)
+
+2. Tensor (real data, Zmumu-only, with pdf + alpha_s + SCETlib theory + prefiring):
+python scripts/rabbit/new_make_tensor.py \
+    mz_5TeV_scetlib_dyturbo_LatticeNP_CT18Z_N3p0LL_N2LO_Corr.hdf5 \
+    -o /tmp/rabbit_test/ \
+    --outname my_tensor_nobkg \
+    --histName ptll \
+    --procFilters Zmumu \
+    --realData
+# to also include backgrounds:  --procFilters Zmumu Ztautau Wplusmunu Wminusmunu Wminustaunu
+# for the Asimov (MC-as-data) version: drop --realData
+
+3. Fit:
+rabbit_fit.py /tmp/rabbit_test/my_tensor_nobkg.hdf5 \
+    -o /tmp/rabbit_test/ \
+    --postfix nobkg \
+    -t 0 --unblind \
+    --doImpacts --globalImpacts \
+    --saveHists --computeHistErrors --computeVariation
+# -> /tmp/rabbit_test/fitresults_nobkg.hdf5
+
+4. Plots (with OUT=~/public_html/, TAG=jul3, mkdir -p $OUT/$TAG):
+# prefit/postfit spectrum with the alpha_s and a few key theory variations overlaid
+rabbit_plot_hists.py /tmp/rabbit_test/fitresults_nobkg.hdf5 \
+    -o $OUT/$TAG -m BaseMapping --postfix nobkg \
+    --varNames pdfAlphaS scetlib_lambda2_nu scetlib_gamma_cusp scetlib_muf \
+    --rrange 0.95 1.05
+
+# same for the pdf eigenvectors (your existing long list works unchanged)
+rabbit_plot_hists.py /tmp/rabbit_test/fitresults_nobkg.hdf5 \
+    -o $OUT/$TAG -m BaseMapping --postfix nobkg_pdfs \
+    --varNames pdf1_pdf2 pdf3_pdf4 pdf5_pdf6 \
+    --rrange 0.995 1.005
+
+# pulls & impacts, and the text table
+rabbit_plot_pulls_and_impacts.py /tmp/rabbit_test/fitresults_nobkg.hdf5 -o $OUT/$TAG --postfix nobkg
+rabbit_print_pulls_and_constraints.py /tmp/rabbit_test/fitresults_nobkg.hdf5
+
+Notes on the names you can plot: the new nuisances are pdfAlphaS, prefiring, pdf1_pdf2 â¦ pdf57_pdf58 as before, and the SCETlib ones all start with scetlib_ â paired ones like scetlib_gamma_cusp, scetlib_lambda2_nu, scetlib_muf, scetlib_kappaFOkappaf, mirrored ones like scetlib_transition_points0_2_0_35_1_0. The full list is in the rabbit_print_pulls_and_constraints.py output, so run that first and pick from it. They're also grouped (theory, pdfCT18Z, experiment, norm), which the impacts plot uses for grouped impacts.
+
+Everything in steps 2â3 I've already run, so /tmp/rabbit_test/fitresults_nobkg.hdf5 is there right now if you want to jump straight to step 4. Want me to add this block to the Rabbit section of your notes?
+
+
+Here they all are, concretely:
+
+Theory correction files (in the wremnants-data submodule):
+/work/submit/hayden17/WRemnants/wremnants-data/data/TheoryCorrections/5020GeV/
+âââ scetlib_dyturboLatticeNP_CT18Z_N3p0LL_N2LO_CorrZ.pkl.lz4          â central + 50 SCETlib variations
+âââ scetlib_dyturboLatticeNP_CT18Z_N3p0LL_N2LO_pdfas_CorrZ.pkl.lz4    â alpha_s 0.116/0.118/0.120
+âââ scetlib_dyturboLatticeNP_CT18Z_N3p0LL_N2LO_pdfvars_CorrZ.pkl.lz4  â 58 CT18Z eigenvectors
+âââ (symlinks with the scetlib_dyturbo_LatticeNP_... spelling â the files above;
+     the CLI names resolve through these â the central one is the symlink I made today)
+
+Prefiring: not a separate file â the L1PreFiringWeight_Muon_Nom/StatUp/StatDn branches inside the NanoAOD events themselves:
+/scratch/submit/cms/wmass/NanoAOD/LowPU/2017G/SingleMuon/Run2017G-UL2017_MiniAODv2_NanoAODv9_GT36-v2/            (data)
+/scratch/submit/cms/wmass/NanoAOD/DYJetsToMuMu_H2ErratumFix_PDFExt_TuneCP5_5020GeV-powhegMiNNLO-pythia8-photos/NanoV9MC2017_TrackFitV722_NanoProdv3/   (Zmumu MC)
+(dataset definitions with all sample paths: wremnants/production/datasets/datasetDict_2017G.py)
+
+Background normalizations (5%/10%): no file â hardcoded at the bottom of scripts/rabbit/new_make_tensor.py (the add_norm_systematic calls).
+
+Pipeline products from today, in order:
+/work/submit/hayden17/WRemnants/mz_5TeV_scetlib_dyturbo_LatticeNP_CT18Z_N3p0LL_N2LO_Corr.hdf5   â histmaker output (all procs, all 3 corrections)
+/tmp/rabbit_test/my_tensor_nobkg.hdf5       â tensor: Zmumu-only + theory + prefiring, real data
+/tmp/rabbit_test/my_tensor_full.hdf5        â tensor: same + backgrounds
+/tmp/rabbit_test/fitresults_nobkg.hdf5      â fit results (the alpha_s = 0.1154 Â± 0.0057 one)
+/tmp/rabbit_test/fitresults_full.hdf5       â fit results with backgrounds
+
+One practical warning: everything under /tmp/rabbit_test/ is on the node's local scratch â it won't survive a reboot and may not be visible from other submit nodes. If you want to keep the tensors/fit results, move them somewhere under /work/submit/hayden17/. And if you ever wonder again where a correction file came from, the trick I used is worth remembering: these pickles carry their own meta_data with the exact command that produced them.
+
+â» Churned for 22s
