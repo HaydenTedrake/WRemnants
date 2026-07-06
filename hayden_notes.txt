@@ -7,12 +7,12 @@ singularity run /cvmfs/unpacked.cern.ch/gitlab-registry.cern.ch/bendavid/cmswmas
 
 cd /work/submit/hayden17/WRemnants && source setup.sh
 
-with PDF variations:
 python scripts/histmakers/mz_5TeV.py \
     --dataPath /scratch/submit/cms/wmass/NanoAOD/ \
     --filterProcs Zmumu_2017G SingleMuon_2017G \
-    --theoryCorr scetlib_dyturbo_LatticeNP_CT18Z_N3p0LL_N2LO_pdfas \
-                 scetlib_dyturbo_LatticeNP_CT18Z_N3p0LL_N2LO_pdfvars \
+    --theoryCorr scetlib_dyturbo_LatticeNP_CT18Z_N3p0LL_N2LO \
+                scetlib_dyturbo_LatticeNP_CT18Z_N3p0LL_N2LO_pdfas \
+                scetlib_dyturbo_LatticeNP_CT18Z_N3p0LL_N2LO_pdfvars \
     --muonCorr scarekit
 
 import pdb; pdb.set_trace()
@@ -21,7 +21,7 @@ import pdb; pdb.set_trace()
 
 https://submit.mit.edu/~hayden17/jun{date}/
 
-IN=mz_5TeV_scetlib_dyturbo_LatticeNP_CT18Z_N3p0LL_N2LO_pdfas_Corr.hdf5
+IN=mz_5TeV_scetlib_dyturbo_LatticeNP_CT18Z_N3p0LL_N2LO_Corr.hdf5
 OUT=~/public_html/
 TAG=jul{date}
 PROCS="Data Zmumu" - or Ztautau/Other
@@ -53,263 +53,30 @@ python /work/submit/hayden17/muonscarekit/code/python/tools/compute_quantiles.py
 ## Rabbit
 
 python scripts/rabbit/new_make_tensor.py \
-    mz_5TeV_scetlib_dyturbo_LatticeNP_CT18Z_N3p0LL_N2LO_pdfas_Corr.hdf5 \
+    mz_5TeV_scetlib_dyturbo_LatticeNP_CT18Z_N3p0LL_N2LO_Corr.hdf5 \
     -o /tmp/rabbit_test/ \
-    --outname my_tensor_data \
+    --outname my_tensor \
     --histName ptll \
-    --procFilters Zmumu \
-    --realData
+    --procFilters Zmumu
 
-rabbit_fit.py /tmp/rabbit_test/my_tensor_data.hdf5 \
+rabbit_fit.py /tmp/rabbit_test/my_tensor.hdf5 \
     -o /tmp/rabbit_test/ \
-    --postfix data \
-    -t 0 \
-    --unblind \
-    --doImpacts \
-    --globalImpacts \
-    --saveHists \
-    --computeHistErrors \
-    --computeVariation
+    -t -1 \
+    --doImpacts --globalImpacts \
+    --saveHists --computeHistErrors --computeVariation
 
 OUT=~/public_html/
 TAG=jul{date}
 mkdir -p $OUT/$TAG
 
 rabbit_plot_hists.py /tmp/rabbit_test/fitresults.hdf5 \
-    -o $OUT/$TAG \
-    -m BaseMapping \
-    --postfix MC \
-    --varNames pdfAlphaS pdf1_pdf2 pdf3_pdf4 pdf5_pdf6 pdf7_pdf8 pdf9_pdf10 pdf11_pdf12 pdf13_pdf14 pdf15_pdf16 pdf17_pdf18 pdf19_pdf20 pdf21_pdf22 pdf23_pdf24 pdf25_pdf26 pdf27_pdf28 pdf29_pdf30 pdf31_pdf32 pdf33_pdf34 pdf35_pdf36 pdf37_pdf38 pdf39_pdf40 pdf41_pdf42 pdf43_pdf44 pdf45_pdf46 pdf47_pdf48 pdf49_pdf50 pdf51_pdf52 pdf53_pdf54 pdf55_pdf56 pdf57_pdf58 \
+    -o $OUT/$TAG -m BaseMapping \
+    --varNames pdfAlphaS scetlibNPgammaEigvar1 resumTNP_gamma_cusp resumFOScaleZSymAvg \
     --rrange 0.95 1.05
 
-rabbit_plot_hists.py /tmp/rabbit_test/fitresult_data.hdf5 \
-    -o $OUT/$TAG \
-    -m BaseMapping \
-    --postfix important \
-    --varNames pdfAlphaS pdf29_pdf30 pdf51_pdf52 \
-    --rrange 0.975 1.025
-
-rabbit_plot_pulls_and_impacts.py /tmp/rabbit_test/fitresults.hdf5 \
-    -o $OUT/$TAG \
-    --postfix MC
-
-    can add --result toy1
-
-rabbit_print_pulls_and_constraints.py /tmp/rabbit_test/fitresults_data.hdf5
-
-# from january
-   Parameter                        pull +/- constraint (pull prefit +/- constraint prefit)
-   ----------------------------------------------------------------------------------------------------
-   pdfAlphaS                         0.0 +/-    0.64975 (        0.0 +/-               0.0)
-   pdf1_pdf2                         0.0 +/-    0.99286 (        0.0 +/-               1.0)
-   pdf3_pdf4                         0.0 +/-     0.9905 (        0.0 +/-               1.0)
-   pdf5_pdf6                         0.0 +/-    0.96807 (        0.0 +/-               1.0)
-   pdf7_pdf8                         0.0 +/-    0.99635 (        0.0 +/-               1.0)
-   pdf9_pdf10                        0.0 +/-    0.98483 (        0.0 +/-               1.0)
-   pdf11_pdf12                       0.0 +/-    0.94644 (        0.0 +/-               1.0)
-   pdf13_pdf14                       0.0 +/-    0.99113 (        0.0 +/-               1.0)
-   pdf15_pdf16                       0.0 +/-    0.99134 (        0.0 +/-               1.0)
-   pdf17_pdf18                       0.0 +/-     0.9773 (        0.0 +/-               1.0)
-   pdf19_pdf20                       0.0 +/-    0.96259 (        0.0 +/-               1.0)
-   pdf21_pdf22                       0.0 +/-    0.98321 (        0.0 +/-               1.0)
-   pdf23_pdf24                       0.0 +/-    0.99058 (        0.0 +/-               1.0)
-   pdf25_pdf26                       0.0 +/-    0.91367 (        0.0 +/-               1.0)
-   pdf27_pdf28                       0.0 +/-    0.96396 (        0.0 +/-               1.0)
-   pdf29_pdf30                       0.0 +/-    0.96501 (        0.0 +/-               1.0)
-   pdf31_pdf32                       0.0 +/-     0.9597 (        0.0 +/-               1.0)
-   pdf33_pdf34                       0.0 +/-    0.98627 (        0.0 +/-               1.0)
-   pdf35_pdf36                       0.0 +/-    0.97596 (        0.0 +/-               1.0)
-   pdf37_pdf38                       0.0 +/-     0.9791 (        0.0 +/-               1.0)
-   pdf39_pdf40                       0.0 +/-     0.9438 (        0.0 +/-               1.0)
-   pdf41_pdf42                       0.0 +/-    0.96955 (        0.0 +/-               1.0)
-   pdf43_pdf44                       0.0 +/-     0.8633 (        0.0 +/-               1.0)
-   pdf45_pdf46                       0.0 +/-    0.93356 (        0.0 +/-               1.0)
-   pdf47_pdf48                       0.0 +/-    0.92405 (        0.0 +/-               1.0)
-   pdf49_pdf50                       0.0 +/-    0.89836 (        0.0 +/-               1.0)
-   pdf51_pdf52                       0.0 +/-    0.84553 (        0.0 +/-               1.0)
-   pdf53_pdf54                       0.0 +/-    0.96855 (        0.0 +/-               1.0)
-   pdf55_pdf56                       0.0 +/-     0.9291 (        0.0 +/-               1.0)
-   pdf57_pdf58                       0.0 +/-    0.87174 (        0.0 +/-               1.0)
-
-# from june
-   Parameter                        pull +/- constraint (pull prefit +/- constraint prefit)
-   ----------------------------------------------------------------------------------------------------
-   pdfAlphaS                         0.0 +/-    0.37394 (        0.0 +/-               0.0)
-   pdf1_pdf2                         0.0 +/-    0.99423 (        0.0 +/-               1.0)
-   pdf3_pdf4                         0.0 +/-    0.97696 (        0.0 +/-               1.0)
-   pdf5_pdf6                         0.0 +/-    0.95721 (        0.0 +/-               1.0)
-   pdf7_pdf8                         0.0 +/-    0.99688 (        0.0 +/-               1.0)
-   pdf9_pdf10                        0.0 +/-    0.97593 (        0.0 +/-               1.0)
-   pdf11_pdf12                       0.0 +/-    0.94098 (        0.0 +/-               1.0)
-   pdf13_pdf14                       0.0 +/-    0.97694 (        0.0 +/-               1.0)
-   pdf15_pdf16                       0.0 +/-    0.99236 (        0.0 +/-               1.0)
-   pdf17_pdf18                       0.0 +/-    0.97271 (        0.0 +/-               1.0)
-   pdf19_pdf20                       0.0 +/-    0.94018 (        0.0 +/-               1.0)
-   pdf21_pdf22                       0.0 +/-    0.97246 (        0.0 +/-               1.0)
-   pdf23_pdf24                       0.0 +/-    0.96862 (        0.0 +/-               1.0)
-   pdf25_pdf26                       0.0 +/-    0.90181 (        0.0 +/-               1.0)
-   pdf27_pdf28                       0.0 +/-    0.92958 (        0.0 +/-               1.0)
-   pdf29_pdf30                       0.0 +/-    0.93899 (        0.0 +/-               1.0)
-   pdf31_pdf32                       0.0 +/-    0.92255 (        0.0 +/-               1.0)
-   pdf33_pdf34                       0.0 +/-    0.97027 (        0.0 +/-               1.0)
-   pdf35_pdf36                       0.0 +/-    0.97173 (        0.0 +/-               1.0)
-   pdf37_pdf38                       0.0 +/-     0.9435 (        0.0 +/-               1.0)
-   pdf39_pdf40                       0.0 +/-    0.93899 (        0.0 +/-               1.0)
-   pdf41_pdf42                       0.0 +/-    0.96191 (        0.0 +/-               1.0)
-   pdf43_pdf44                       0.0 +/-    0.82942 (        0.0 +/-               1.0)
-   pdf45_pdf46                       0.0 +/-    0.92418 (        0.0 +/-               1.0)
-   pdf47_pdf48                       0.0 +/-    0.92845 (        0.0 +/-               1.0)
-   pdf49_pdf50                       0.0 +/-    0.86516 (        0.0 +/-               1.0)
-   pdf51_pdf52                       0.0 +/-    0.79407 (        0.0 +/-               1.0)
-   pdf53_pdf54                       0.0 +/-    0.95492 (        0.0 +/-               1.0)
-   pdf55_pdf56                       0.0 +/-    0.92909 (        0.0 +/-               1.0)
-   pdf57_pdf58                       0.0 +/-    0.86107 (        0.0 +/-               1.0)
-
-# from july
-   Parameter                        pull +/- constraint (pull prefit +/- constraint prefit)
-   ----------------------------------------------------------------------------------------------------
-   pdfAlphaS                         0.0 +/-    0.37423 (        0.0 +/-               0.0)
-   pdf1_pdf2                         0.0 +/-    0.99425 (        0.0 +/-               1.0)
-   pdf3_pdf4                         0.0 +/-    0.97887 (        0.0 +/-               1.0)
-   pdf5_pdf6                         0.0 +/-    0.95585 (        0.0 +/-               1.0)
-   pdf7_pdf8                         0.0 +/-    0.99697 (        0.0 +/-               1.0)
-   pdf9_pdf10                        0.0 +/-    0.97572 (        0.0 +/-               1.0)
-   pdf11_pdf12                       0.0 +/-     0.9406 (        0.0 +/-               1.0)
-   pdf13_pdf14                       0.0 +/-     0.9794 (        0.0 +/-               1.0)
-   pdf15_pdf16                       0.0 +/-    0.99307 (        0.0 +/-               1.0)
-   pdf17_pdf18                       0.0 +/-    0.97268 (        0.0 +/-               1.0)
-   pdf19_pdf20                       0.0 +/-    0.93967 (        0.0 +/-               1.0)
-   pdf21_pdf22                       0.0 +/-    0.97248 (        0.0 +/-               1.0)
-   pdf23_pdf24                       0.0 +/-    0.96885 (        0.0 +/-               1.0)
-   pdf25_pdf26                       0.0 +/-     0.9029 (        0.0 +/-               1.0)
-   pdf27_pdf28                       0.0 +/-    0.92985 (        0.0 +/-               1.0)
-   pdf29_pdf30                       0.0 +/-    0.93926 (        0.0 +/-               1.0)
-   pdf31_pdf32                       0.0 +/-    0.92292 (        0.0 +/-               1.0)
-   pdf33_pdf34                       0.0 +/-    0.97154 (        0.0 +/-               1.0)
-   pdf35_pdf36                       0.0 +/-    0.97143 (        0.0 +/-               1.0)
-   pdf37_pdf38                       0.0 +/-    0.95029 (        0.0 +/-               1.0)
-   pdf39_pdf40                       0.0 +/-    0.93935 (        0.0 +/-               1.0)
-   pdf41_pdf42                       0.0 +/-    0.96215 (        0.0 +/-               1.0)
-   pdf43_pdf44                       0.0 +/-    0.82926 (        0.0 +/-               1.0)
-   pdf45_pdf46                       0.0 +/-    0.92436 (        0.0 +/-               1.0)
-   pdf47_pdf48                       0.0 +/-    0.92895 (        0.0 +/-               1.0)
-   pdf49_pdf50                       0.0 +/-    0.86649 (        0.0 +/-               1.0)
-   pdf51_pdf52                       0.0 +/-    0.79464 (        0.0 +/-               1.0)
-   pdf53_pdf54                       0.0 +/-    0.95406 (        0.0 +/-               1.0)
-   pdf55_pdf56                       0.0 +/-    0.92903 (        0.0 +/-               1.0)
-   pdf57_pdf58                       0.0 +/-    0.86022 (        0.0 +/-               1.0)
-
-# from july (DATA)
-   Parameter                        pull +/- constraint (pull prefit +/- constraint prefit)
-   ----------------------------------------------------------------------------------------------------
-   pdfAlphaS                      -4.80977 +/-    1.09957 (        0.0 +/-               0.0)
-   pdf1_pdf2                      -0.06028 +/-    0.99533 (        0.0 +/-               1.0)
-   pdf3_pdf4                      -0.59867 +/-    0.98806 (        0.0 +/-               1.0)
-   pdf5_pdf6                      -0.03322 +/-    0.97189 (        0.0 +/-               1.0)
-   pdf7_pdf8                      -0.23702 +/-    0.99831 (        0.0 +/-               1.0)
-   pdf9_pdf10                     0.77018 +/-    0.98581 (        0.0 +/-               1.0)
-   pdf11_pdf12                    0.31656 +/-     0.9458 (        0.0 +/-               1.0)
-   pdf13_pdf14                    -0.0198 +/-    0.99769 (        0.0 +/-               1.0)
-   pdf15_pdf16                    0.27796 +/-    0.99682 (        0.0 +/-               1.0)
-   pdf17_pdf18                    -0.42198 +/-    0.98358 (        0.0 +/-               1.0)
-   pdf19_pdf20                    -1.06708 +/-    0.95743 (        0.0 +/-               1.0)
-   pdf21_pdf22                    0.24523 +/-    0.98175 (        0.0 +/-               1.0)
-   pdf23_pdf24                     0.473 +/-    0.98769 (        0.0 +/-               1.0)
-   pdf25_pdf26                    -0.6865 +/-    0.91329 (        0.0 +/-               1.0)
-   pdf27_pdf28                    0.33584 +/-    0.95625 (        0.0 +/-               1.0)
-   pdf29_pdf30                    -0.50292 +/-    0.96354 (        0.0 +/-               1.0)
-   pdf31_pdf32                    -0.17393 +/-    0.96764 (        0.0 +/-               1.0)
-   pdf33_pdf34                    0.44315 +/-     0.9849 (        0.0 +/-               1.0)
-   pdf35_pdf36                    -0.36915 +/-    0.97974 (        0.0 +/-               1.0)
-   pdf37_pdf38                    0.26792 +/-    0.98183 (        0.0 +/-               1.0)
-   pdf39_pdf40                    0.48776 +/-    0.95743 (        0.0 +/-               1.0)
-   pdf41_pdf42                    -0.19904 +/-    0.97464 (        0.0 +/-               1.0)
-   pdf43_pdf44                    -1.21451 +/-    0.86193 (        0.0 +/-               1.0)
-   pdf45_pdf46                    -0.94178 +/-    0.96218 (        0.0 +/-               1.0)
-   pdf47_pdf48                    0.42516 +/-     0.9365 (        0.0 +/-               1.0)
-   pdf49_pdf50                    1.42105 +/-    0.89878 (        0.0 +/-               1.0)
-   pdf51_pdf52                    -0.79774 +/-    0.90191 (        0.0 +/-               1.0)
-   pdf53_pdf54                    -0.20469 +/-     0.9792 (        0.0 +/-               1.0)
-   pdf55_pdf56                    -0.96165 +/-    0.94352 (        0.0 +/-               1.0)
-   pdf57_pdf58                    -1.9847 +/-    0.90271 (        0.0 +/-               1.0)
-
-# from july (DATA with extra uncertainties)
-   Parameter                        pull +/- constraint (pull prefit +/- constraint prefit)
-   ----------------------------------------------------------------------------------------------------
-   pdfAlphaS                      -1.27914 +/-    2.83943 (        0.0 +/-               0.0)
-   pdf1_pdf2                      0.00264 +/-    0.99704 (        0.0 +/-               1.0)
-   pdf3_pdf4                      -0.00749 +/-     0.9978 (        0.0 +/-               1.0)
-   pdf5_pdf6                      -0.0463 +/-    0.98415 (        0.0 +/-               1.0)
-   pdf7_pdf8                      0.00384 +/-    0.99974 (        0.0 +/-               1.0)
-   pdf9_pdf10                     0.02118 +/-    0.99813 (        0.0 +/-               1.0)
-   pdf11_pdf12                    0.03543 +/-    0.95944 (        0.0 +/-               1.0)
-   pdf13_pdf14                    0.01333 +/-    0.99856 (        0.0 +/-               1.0)
-   pdf15_pdf16                    -0.00404 +/-    0.99918 (        0.0 +/-               1.0)
-   pdf17_pdf18                    -0.04056 +/-    0.98871 (        0.0 +/-               1.0)
-   pdf19_pdf20                     7e-05 +/-    0.98746 (        0.0 +/-               1.0)
-   pdf21_pdf22                    -0.00439 +/-     0.9884 (        0.0 +/-               1.0)
-   pdf23_pdf24                    -0.06147 +/-    0.99484 (        0.0 +/-               1.0)
-   pdf25_pdf26                    0.00113 +/-    0.93762 (        0.0 +/-               1.0)
-   pdf27_pdf28                    -0.03485 +/-    0.98318 (        0.0 +/-               1.0)
-   pdf29_pdf30                    -0.03416 +/-    0.99068 (        0.0 +/-               1.0)
-   pdf31_pdf32                    0.00434 +/-    0.98867 (        0.0 +/-               1.0)
-   pdf33_pdf34                    0.02651 +/-    0.99842 (        0.0 +/-               1.0)
-   pdf35_pdf36                    -0.0146 +/-    0.98854 (        0.0 +/-               1.0)
-   pdf37_pdf38                    0.01185 +/-    0.99718 (        0.0 +/-               1.0)
-   pdf39_pdf40                    0.01361 +/-    0.97149 (        0.0 +/-               1.0)
-   pdf41_pdf42                    -0.00071 +/-    0.98554 (        0.0 +/-               1.0)
-   pdf43_pdf44                    0.02571 +/-    0.94313 (        0.0 +/-               1.0)
-   pdf45_pdf46                    0.0163 +/-    0.98835 (        0.0 +/-               1.0)
-   pdf47_pdf48                    -0.02908 +/-    0.96128 (        0.0 +/-               1.0)
-   pdf49_pdf50                     0.004 +/-    0.96038 (        0.0 +/-               1.0)
-   pdf51_pdf52                    0.01642 +/-    0.98083 (        0.0 +/-               1.0)
-   pdf53_pdf54                    0.03815 +/-     0.9957 (        0.0 +/-               1.0)
-   pdf55_pdf56                    0.02016 +/-     0.9784 (        0.0 +/-               1.0)
-   pdf57_pdf58                    -0.00626 +/-    0.99156 (        0.0 +/-               1.0)
-   prefiring                      -0.00083 +/-    0.99997 (        0.0 +/-               1.0)
-   scetlib_b_qg                   -0.05261 +/-    0.97937 (        0.0 +/-               1.0)
-   scetlib_b_qqbarV               -0.00057 +/-        1.0 (        0.0 +/-               1.0)
-   scetlib_b_qqDS                    0.0 +/-        1.0 (        0.0 +/-               1.0)
-   scetlib_b_qqS                  0.01494 +/-    0.99977 (        0.0 +/-               1.0)
-   scetlib_b_qqV                  -0.08783 +/-    0.97819 (        0.0 +/-               1.0)
-   scetlib_delta_lambda2          -0.00379 +/-    0.99881 (        0.0 +/-               1.0)
-   scetlib_gamma_cusp             -0.00651 +/-    0.99998 (        0.0 +/-               1.0)
-   scetlib_gamma_mu_q             0.01332 +/-    0.99929 (        0.0 +/-               1.0)
-   scetlib_gamma_nu               0.04136 +/-    0.99868 (        0.0 +/-               1.0)
-   scetlib_h_qqV                  -0.02156 +/-    0.99735 (        0.0 +/-               1.0)
-   scetlib_kappaFOkappaf          -0.40465 +/-    0.91199 (        0.0 +/-               1.0)
-   scetlib_lambda2                -0.70893 +/-    0.76397 (        0.0 +/-               1.0)
-   scetlib_lambda2_nu             -0.30752 +/-      0.977 (        0.0 +/-               1.0)
-   scetlib_lambda2_nu0_0587_lambda4_nu0_0116_lambda_inf_nu1_6Ext 0.20576 +/-    0.98642 (        0.0 +/-               1.0)
-   scetlib_lambda2_nu0_0696_lambda4_nu0_0122_lambda_inf_nu1_1Ext 0.08441 +/-    0.99585 (        0.0 +/-               1.0)
-   scetlib_lambda2_nu0_0867_lambda4_nu0_0056 0.03386 +/-    0.99984 (        0.0 +/-               1.0)
-   scetlib_lambda2_nu0_0873_lambda4_nu0_0092 -0.03325 +/-    0.99984 (        0.0 +/-               1.0)
-   scetlib_lambda2_nu0_1044_lambda4_nu0_0026_lambda_inf_nu2_1Ext -0.07495 +/-    0.99605 (        0.0 +/-               1.0)
-   scetlib_lambda2_nu0_1153_lambda4_nu0_0032_lambda_inf_nu1_6Ext -0.17236 +/-    0.98795 (        0.0 +/-               1.0)
-   scetlib_lambda4_nu             -0.11312 +/-    0.99812 (        0.0 +/-               1.0)
-   scetlib_lambda40_0             0.41009 +/-    0.97726 (        0.0 +/-               1.0)
-   scetlib_lambda40_01            0.33479 +/-    0.98491 (        0.0 +/-               1.0)
-   scetlib_lambda40_12            -0.33763 +/-    0.98492 (        0.0 +/-               1.0)
-   scetlib_lambda40_16            -0.53697 +/-     0.9618 (        0.0 +/-               1.0)
-   scetlib_lambda_inf_nu          -0.00174 +/-        1.0 (        0.0 +/-               1.0)
-   scetlib_muf                    -0.49438 +/-    0.91671 (        0.0 +/-               1.0)
-   scetlib_mufkappaFOkappaf       0.0666 +/-    0.83773 (        0.0 +/-               1.0)
-   scetlib_renorm_fact_resum_scale_envelope_Down 0.31101 +/-    0.88678 (        0.0 +/-               1.0)
-   scetlib_renorm_fact_resum_scale_envelope_Up 0.6273 +/-    0.90656 (        0.0 +/-               1.0)
-   scetlib_renorm_fact_resum_transition_scale_envelope_Down 0.39701 +/-    0.78889 (        0.0 +/-               1.0)
-   scetlib_renorm_fact_resum_transition_scale_envelope_Up 0.6273 +/-    0.90656 (        0.0 +/-               1.0)
-   scetlib_renorm_fact_scale_envelope_Down 0.31101 +/-    0.88678 (        0.0 +/-               1.0)
-   scetlib_renorm_fact_scale_envelope_Up 0.6273 +/-    0.90656 (        0.0 +/-               1.0)
-   scetlib_renorm_fact_scale_pt20_envelope_Down -0.03461 +/-    0.93075 (        0.0 +/-               1.0)
-   scetlib_renorm_fact_scale_pt20_envelope_Up -0.08559 +/-    0.87683 (        0.0 +/-               1.0)
-   scetlib_renorm_scale_envelope_Down 0.24928 +/-    0.90011 (        0.0 +/-               1.0)
-   scetlib_renorm_scale_envelope_Up 0.54139 +/-    0.94415 (        0.0 +/-               1.0)
-   scetlib_renorm_scale_pt20_envelope_Down -0.17524 +/-    0.94377 (        0.0 +/-               1.0)
-   scetlib_renorm_scale_pt20_envelope_Up -0.15704 +/-     0.8773 (        0.0 +/-               1.0)
-   scetlib_s                      0.07645 +/-    0.98566 (        0.0 +/-               1.0)
-   scetlib_transition_points0_2_0_35_1_0 -0.02659 +/-    0.73945 (        0.0 +/-               1.0)
-   scetlib_transition_points0_2_0_75_1_0 0.1287 +/-     0.9746 (        0.0 +/-               1.0)
-   scetlib_transition_points0_3_0_6_0_9 -0.13311 +/-     0.9398 (        0.0 +/-               1.0)
+rabbit_plot_pulls_and_impacts.py /tmp/rabbit_test/fitresults.hdf5 -o $OUT/$TAG
+rabbit_print_impacts.py /tmp/rabbit_test/fitresults.hdf5 --impactType global -s
+rabbit_print_pulls_and_constraints.py /tmp/rabbit_test/fitresults.hdf5
 
 cp hayden_notes.txt ../wremnants-notes/ && git -C ../wremnants-notes commit -am "update notes" && git -C ../wremnants-notes push
 
@@ -317,64 +84,20 @@ cp hayden_notes.txt ../wremnants-notes/ && git -C ../wremnants-notes commit -am 
 
 
 
-Here's the full sequence, copy-pasteable from /work/submit/hayden17/WRemnants inside your Singularity shell (after source setup.sh):
 
-1. Histmaker (already done today â output exists; rerun only if you change something):
-python scripts/histmakers/mz_5TeV.py \
-    --dataPath /scratch/submit/cms/wmass/NanoAOD/ \
-    --theoryCorr scetlib_dyturbo_LatticeNP_CT18Z_N3p0LL_N2LO \
-                 scetlib_dyturbo_LatticeNP_CT18Z_N3p0LL_N2LO_pdfas \
-                 scetlib_dyturbo_LatticeNP_CT18Z_N3p0LL_N2LO_pdfvars \
-    --muonCorr scarekit
-# -> mz_5TeV_scetlib_dyturbo_LatticeNP_CT18Z_N3p0LL_N2LO_Corr.hdf5  (no --filterProcs: runs all processes)
 
-2. Tensor (real data, Zmumu-only, with pdf + alpha_s + SCETlib theory + prefiring):
-python scripts/rabbit/new_make_tensor.py \
-    mz_5TeV_scetlib_dyturbo_LatticeNP_CT18Z_N3p0LL_N2LO_Corr.hdf5 \
-    -o /tmp/rabbit_test/ \
-    --outname my_tensor \
-    --histName ptll \
-    --procFilters Zmumu \
-    --realData
-# to also include backgrounds:  --procFilters Zmumu Ztautau Wplusmunu Wminusmunu Wminustaunu
-# for the Asimov (MC-as-data) version: drop --realData
 
-3. Fit:
-rabbit_fit.py /tmp/rabbit_test/my_tensor.hdf5 \
-    -o /tmp/rabbit_test/ \
-    -t 0 --unblind \
-    --doImpacts --globalImpacts \
-    --saveHists --computeHistErrors --computeVariation
-# -> /tmp/rabbit_test/fitresults.hdf5
 
-4. Plots (with OUT=~/public_html/, TAG=jul3, mkdir -p $OUT/$TAG):
-# prefit/postfit spectrum with the alpha_s and a few key theory variations overlaid
-rabbit_plot_hists.py /tmp/rabbit_test/fitresults.hdf5 \
-    -o $OUT/$TAG -m BaseMapping --postfix extra \
-    --varNames pdfAlphaS scetlib_lambda2_nu scetlib_gamma_cusp scetlib_muf \
-    --rrange 0.95 1.05
 
-# same for the pdf eigenvectors (your existing long list works unchanged)
-rabbit_plot_hists.py /tmp/rabbit_test/fitresults_nobkg.hdf5 \
-    -o $OUT/$TAG -m BaseMapping --postfix nobkg_pdfs \
-    --varNames pdf1_pdf2 pdf3_pdf4 pdf5_pdf6 \
-    --rrange 0.995 1.005
 
-# pulls & impacts, and the text table
-rabbit_plot_pulls_and_impacts.py /tmp/rabbit_test/fitresults.hdf5 -o $OUT/$TAG --postfix extra
-rabbit_print_pulls_and_constraints.py /tmp/rabbit_test/fitresults.hdf5
 
-pdfAlphaS, prefiring, pdf1_pdf2 â¦ pdf57_pdf58 as before, and the SCETlib ones all start with scetlib_ â paired ones like scetlib_gamma_cusp, scetlib_lambda2_nu, scetlib_muf, scetlib_kappaFOkappaf, mirrored ones like scetlib_transition_points0_2_0_35_1_0. The full list is in the rabbit_print_pulls_and_constraints.py output, so run that first and pick from it. They're also grouped (theory, pdfCT18Z, experiment, norm), which the impacts plot uses for grouped impacts.
-
-Here they all are, concretely:
+### Correction Files
 
 Theory correction files (in the wremnants-data submodule):
 /work/submit/hayden17/WRemnants/wremnants-data/data/TheoryCorrections/5020GeV/
-âââ scetlib_dyturboLatticeNP_CT18Z_N3p0LL_N2LO_CorrZ.pkl.lz4          â central + 50 SCETlib variations
-âââ scetlib_dyturboLatticeNP_CT18Z_N3p0LL_N2LO_pdfas_CorrZ.pkl.lz4    â alpha_s 0.116/0.118/0.120
-âââ scetlib_dyturboLatticeNP_CT18Z_N3p0LL_N2LO_pdfvars_CorrZ.pkl.lz4  â 58 CT18Z eigenvectors
-âââ (symlinks with the scetlib_dyturbo_LatticeNP_... spelling â the files above;
-     the CLI names resolve through these â the central one is the symlink I made today)
+ scetlib_dyturboLatticeNP_CT18Z_N3p0LL_N2LO_CorrZ.pkl.lz4          - central + 50 SCETlib variations
+ scetlib_dyturboLatticeNP_CT18Z_N3p0LL_N2LO_pdfas_CorrZ.pkl.lz4    - alpha_s 0.116/0.118/0.120
+ scetlib_dyturboLatticeNP_CT18Z_N3p0LL_N2LO_pdfvars_CorrZ.pkl.lz4  - 58 CT18Z eigenvectors
 
 Prefiring: not a separate file â the L1PreFiringWeight_Muon_Nom/StatUp/StatDn branches inside the NanoAOD events themselves:
 /scratch/submit/cms/wmass/NanoAOD/LowPU/2017G/SingleMuon/Run2017G-UL2017_MiniAODv2_NanoAODv9_GT36-v2/            (data)
@@ -390,13 +113,7 @@ Pipeline products from today, in order:
 /tmp/rabbit_test/fitresults_nobkg.hdf5      â fit results (the alpha_s = 0.1154 Â± 0.0057 one)
 /tmp/rabbit_test/fitresults_full.hdf5       â fit results with backgrounds
 
-One practical warning: everything under /tmp/rabbit_test/ is on the node's local scratch â it won't survive a reboot and may not be visible from other submit nodes. If you want to keep the tensors/fit results, move them somewhere under /work/submit/hayden17/. And if you ever wonder again where a correction file came from, the trick I used is worth remembering: these pickles carry their own meta_data with the exact command that produced them.
-
-â» Churned for 22s
-
-
-
-Once everything finishes, the final products land in:
+### Muon Scale Uncertainties
 
 /work/submit/hayden17/muonscarekit/code/output/hists/2017_LowPU/Z/uncertainties/stat/
 - scale_step1_C_uncertainty.root â scale correction spread from the 1/pT step (Îº and Î» as M/A TH2Ds in etaâphi, with the bootstrap std as bin errors, plus their correlation)
@@ -409,103 +126,21 @@ output/hists/2017_LowPU/Z/condor/stat/<0â99>/ â each holds that bootst
 
 Plots (from the -P flag on the aggregation): output/plots/stat_uncs/uncertainties/stat/ â k.pdf, per-eta-bin Îº/Î» plots, and the scale/resolution up-down impact plots on the mass peak.
 
-Logs: per-job in output/logs/stat/job_<i>.log, aggregation in output/logs/stat/aggregate.log, overall progress in /work/submit/hayden17/stat_uncs.log.
-
 One heads-up for the step after this: WRemnants currently reads only the nominal calibration from wremnants-data/data/lowPU/muonscarekit/ (step2_fitresults.root, step3_correction.root, step4_k.root) â there's no uncertainty input there yet. So to use these in the fit you'll want to copy the uncertainty files into wremnants-data and add variation weights/columns to lowpu_muonscarekit.hpp + mz_5TeV.py. Happy to help with that once the run finishes.
 
-  # 0. Enter the container (from /work/submit/hayden17):
-  APPTAINER_BIND="/tmp,/home/submit,/work/submit,/ceph/submit,/scratch/submit,/cvmfs,/etc/grid-security,/run" \
-  singularity run /cvmfs/unpacked.cern.ch/gitlab-registry.cern.ch/bendavid/cmswmassdocker/wmassdevrolling:latest
-  cd /work/submit/hayden17/WRemnants && source setup.sh
+### Groups
 
-  # 1. Histmaker (unchanged â output already exists; rerun only if you change the histmaker):
-  python scripts/histmakers/mz_5TeV.py \
-      --dataPath /scratch/submit/cms/wmass/NanoAOD/ \
-      --theoryCorr scetlib_dyturbo_LatticeNP_CT18Z_N3p0LL_N2LO \
-                   scetlib_dyturbo_LatticeNP_CT18Z_N3p0LL_N2LO_pdfas \
-                   scetlib_dyturbo_LatticeNP_CT18Z_N3p0LL_N2LO_pdfvars \
-      --muonCorr scarekit
-  # -> mz_5TeV_scetlib_dyturbo_LatticeNP_CT18Z_N3p0LL_N2LO_Corr.hdf5
+group                        content         
+POI                        â pdfAlphaS (as_0116/0120, unconstrained) 
+pdfCT18Z (58)              â 29 eigenvector pairs, Ã 1/1.645 CL conversion, quadratic symmetrization
+resumNonpert (3)           â Lambda2, Lambda4, Delta_Lambda2                                       
+resumTNP (13)              â 3 gamma-NP eigenvariations + 10 theory nuisance parameters            
+resumTransitionFOScale (4) â transition points + FO pt20 scale envelope                           
+experiment (1)             â prefiring only                                                         
+MC stat                    â bin-by-bin (Barlow-Beeston lite from sumw2)                  
+norm                       â 5% Ztautau / 10% other backgrounds                            
 
-  # 2. Tensor â BLINDED: no --realData (Asimov MC-as-data).
-  #    new_make_tensor.py now builds the canonical systematics:
-  #    29 CT18Z pairs (x 1/1.645 CL scaling), pdfAlphaS (unconstrained),
-  #    18 SCETlib nuisances (NP + TNP + transition/FO), prefiring.
-  python scripts/rabbit/new_make_tensor.py \
-      mz_5TeV_scetlib_dyturbo_LatticeNP_CT18Z_N3p0LL_N2LO_Corr.hdf5 \
-      -o /work/submit/hayden17/rabbit_asimov/ \
-      --outname tensor_asimov \
-      --histName ptll \
-      --procFilters Zmumu
-  # with backgrounds:  --procFilters Zmumu Ztautau Wplusmunu Wminusmunu Wminustaunu   (--outname tensor_asimov_bkg)
+### Implementing with Data
 
-  # 3. Fit â BLINDED: -t -1 (Asimov), never -t 0/--unblind while we're changing the model:
-  rabbit_fit.py /work/submit/hayden17/rabbit_asimov/tensor_asimov.hdf5 \
-      -o /work/submit/hayden17/rabbit_asimov/ \
-      --postfix baseline \
-      -t -1 \
-      --doImpacts --globalImpacts \
-      --saveHists --computeHistErrors --computeVariation
-  # -> /work/submit/hayden17/rabbit_asimov/fitresults_baseline.hdf5
-
-  # 4. Look at expected constraints and impacts (this is the Asimov-study output):
-  FIT=/work/submit/hayden17/rabbit_asimov/fitresults_baseline.hdf5
-
-  # text table of all nuisances (pulls are 0 by construction; constraints are the physics)
-  rabbit_print_pulls_and_constraints.py $FIT
-
-  # grouped global impacts on alpha_s (the summary table)
-  rabbit_print_impacts.py $FIT --impactType global -s
-
-  # 5. Plots (OUT=~/public_html/, TAG=jul6_asimov, mkdir -p $OUT/$TAG):
-  OUT=~/public_html/ ; TAG=jul6_asimov ; mkdir -p $OUT/$TAG
-
-  # spectrum with alpha_s and key theory variations overlaid
-  # NOTE: theory nuisance names changed to the canonical ones:
-  #   scetlibNPLambda2/Lambda4/Delta_Lambda2, scetlibNPgammaEigvar1-3,
-  #   resumTNP_gamma_cusp / _gamma_mu_q / _gamma_nu / _h_qqV / _s / _b_*,
-  #   resumTransitionZ{SymAvg,SymDiff}, resumFOScaleZ{SymAvg,SymDiff}
-  rabbit_plot_hists.py $FIT \
-      -o $OUT/$TAG -m BaseMapping --postfix theory \
-      --varNames pdfAlphaS scetlibNPLambda2 resumTNP_gamma_cusp resumFOScaleZSymAvg \
-      --rrange 0.95 1.05
-
-  # pdf eigenvectors â pairs are now split into SymAvg/SymDiff components:
-  rabbit_plot_hists.py $FIT \
-      -o $OUT/$TAG -m BaseMapping --postfix pdfs \
-      --varNames pdf1_pdf2SymAvg pdf3_pdf4SymAvg pdf5_pdf6SymAvg \
-      --rrange 0.995 1.005
-
-  # pulls & impacts plot
-  rabbit_plot_pulls_and_impacts.py $FIT -o $OUT/$TAG --postfix baseline
-
-  Key differences from the old block in your notes:
-
-
-
-
-ed variation histograms (62 central-file vars, 3 Î±_s, 59 PDF, prefiring Stat Up/Down)
-
-Tensor level (new_make_tensor.py, what the fit sees) â 80 nuisances + POI:
-
-ââââââââââââââââââââââââââââââ¬ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ¬ââââââââââââââââââââââââââââââââââââââââââââââ
-â           group            â                                 content                                 â                   status                    â
-ââââââââââââââââââââââââââââââ¼ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ¼ââââââââââââââââââââââââââââââââââââââââââââââ¤
-â POI                        â pdfAlphaS (as_0116/0120, unconstrained)                                 â â                                           â
-ââââââââââââââââââââââââââââââ¼ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ¼ââââââââââââââââââââââââââââââââââââââââââââââ¤
-â pdfCT18Z (58)              â 29 eigenvector pairs, Ã 1/1.645 CL conversion, quadratic symmetrization â â fixed this session                        â
-ââââââââââââââââââââââââââââââ¼ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ¼ââââââââââââââââââââââââââââââââââââââââââââââ¤
-â resumNonpert (3)           â Lambda2, Lambda4, Delta_Lambda2                                         â â canonical since this session              â
-ââââââââââââââââââââââââââââââ¼ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ¼ââââââââââââââââââââââââââââââââââââââââââââââ¤
-â resumTNP (13)              â 3 gamma-NP eigenvariations + 10 theory nuisance parameters              â â canonical                                 â
-ââââââââââââââââââââââââââââââ¼ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ¼ââââââââââââââââââââââââââââââââââââââââââââââ¤
-â resumTransitionFOScale (4) â transition points + FO pt20 scale envelope                              â â canonical                                 â
-ââââââââââââââââââââââââââââââ¼ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ¼ââââââââââââââââââââââââââââââââââââââââââââââ¤
-â experiment (1)             â prefiring only                                                          â â                                           â
-ââââââââââââââââââââââââââââââ¼ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ¼ââââââââââââââââââââââââââââââââââââââââââââââ¤
-â MC stat                    â bin-by-bin (Barlow-Beeston lite from sumw2)                             â â rabbit default                            â
-ââââââââââââââââââââââââââââââ¼ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ¼ââââââââââââââââââââââââââââââââââââââââââââââ¤
-â norm                       â 5% Ztautau / 10% other backgrounds                                      â dormant â backgrounds not in the tensor yet â
-ââââââââââââââââââââââââââââââ´ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ´ââââââââââââââââââââââââââââââââââââââââââââââ
-
-Fit level: -t -1 Asimov, ptll shape, Zmumu-only, 300/pb.
+python scripts/rabbit/new_make_tensor.py ... --realData --noNormToData
+rabbit_fit.py ... -t 0 --unblind
