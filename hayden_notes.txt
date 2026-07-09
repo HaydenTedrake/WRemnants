@@ -53,7 +53,7 @@ python /work/submit/hayden17/muonscarekit/code/python/tools/compute_quantiles.py
 python scripts/rabbit/new_make_tensor.py \
     mz_5TeV_scetlib_dyturbo_LatticeNP_CT18Z_N3p0LL_N2LO_Corr.hdf5 \
     -o /tmp/rabbit_test/ --outname my_tensor \
-    --histName ptll_vs_absYll --procFilters Zmumu
+    --histName ptll_vs_yll --procFilters Zmumu
 
 rabbit_fit.py /tmp/rabbit_test/my_tensor.hdf5 \
     -o /tmp/rabbit_test/ \
@@ -61,7 +61,7 @@ rabbit_fit.py /tmp/rabbit_test/my_tensor.hdf5 \
     --doImpacts --globalImpacts \
     --saveHists --computeHistErrors --computeVariation \
     -m Project ch0 ptll \
-    -m Project ch0 absYll
+    -m Project ch0 yll
 
 OUT=~/public_html/
 TAG=jul{date}
@@ -69,8 +69,9 @@ mkdir -p $OUT/$TAG
 
 rabbit_plot_hists.py /tmp/rabbit_test/fitresults.hdf5 \
     -o $OUT/$TAG -m Project ch0 ptll \
-    --varNames pdfAlphaS scetlibNPgammaEigvar1 resumTNP_gamma_cusp resumFOScaleZSymAvg \
-    --rrange 0.95 1.05
+    --varNames pdfAlphaS scetlibNPLambda2 scetlibNPLambda4 luminosity \
+        scetlibNPDelta_Lambda2 resumFOScaleZSymAvg pdf19_pdf20SymAvg resumTNP_b_qqV \
+    --rrange 0.97 1.03
 
 rabbit_plot_pulls_and_impacts.py /tmp/rabbit_test/fitresults.hdf5 -o $OUT/$TAG
 rabbit_print_impacts.py /tmp/rabbit_test/fitresults.hdf5 --impactType global -s # grouped
@@ -104,13 +105,6 @@ Prefiring: not a separate file â the L1PreFiringWeight_Muon_Nom/StatUp/Stat
 
 Background normalizations (5%/10%): no file â hardcoded at the bottom of scripts/rabbit/new_make_tensor.py (the add_norm_systematic calls).
 
-Pipeline products from today, in order:
-/work/submit/hayden17/WRemnants/mz_5TeV_scetlib_dyturbo_LatticeNP_CT18Z_N3p0LL_N2LO_Corr.hdf5   â histmaker output (all procs, all 3 corrections)
-/tmp/rabbit_test/my_tensor_nobkg.hdf5       â tensor: Zmumu-only + theory + prefiring, real data
-/tmp/rabbit_test/my_tensor_full.hdf5        â tensor: same + backgrounds
-/tmp/rabbit_test/fitresults_nobkg.hdf5      â fit results (the alpha_s = 0.1154 Â± 0.0057 one)
-/tmp/rabbit_test/fitresults_full.hdf5       â fit results with backgrounds
-
 ### Muon Scale Uncertainties
 
 /work/submit/hayden17/muonscarekit/code/output/hists/2017_LowPU/Z/uncertainties/stat/
@@ -124,7 +118,11 @@ output/hists/2017_LowPU/Z/condor/stat/<0â99>/ â each holds that bootst
 
 Plots (from the -P flag on the aggregation): output/plots/stat_uncs/uncertainties/stat/ â k.pdf, per-eta-bin Îº/Î» plots, and the scale/resolution up-down impact plots on the mass peak.
 
-One heads-up for the step after this: WRemnants currently reads only the nominal calibration from wremnants-data/data/lowPU/muonscarekit/ (step2_fitresults.root, step3_correction.root, step4_k.root) â there's no uncertainty input there yet. So to use these in the fit you'll want to copy the uncertainty files into wremnants-data and add variation weights/columns to lowpu_muonscarekit.hpp + mz_5TeV.py. Happy to help with that once the run finishes.
+When scarekit bootstrap hits 100/100:
+   cp /work/submit/hayden17/muonscarekit/code/output/hists/2017_LowPU/Z/uncertainties/stat/{scale_step3_correction_uncertainty.root,resolution_uncertainty.root} \
+      wremnants-data/data/lowPU/muonscarekit/
+   then rerun steps 1, 3, 4. (Check progress:
+   ls muonscarekit/code/output/hists/2017_LowPU/Z/condor/stat/*/step4_k.root | wc -l)
 
 ### Groups
 
@@ -151,18 +149,15 @@ rabbit_fit.py ... -t 0 --unblind
 
 So the honest framing for your supervisor isn't "this approach is wrong" â it's: "the 13 TeV analysis earns its angular sensitivity by carrying a complete experimental-systematics model; in my current simplified setup the same construction turns into an unprotected assumption, so I fit ptllâyll until the efficiency and momentum-scale uncertainties are implemented." Which also means the work isn't wasted: the 4D histograms plus the scarekit uncertainties (landing Thursday) and eventually efficiency SFs are exactly the path to legitimately revisiting it â and the factorization switch gives you the A/B test to show how much angular sensitivity you've earned at each step.
 
+### One-time (or after MC changes): produce the helicity xsecs input
 
-
-
-
-
-# one-time (or after MC changes): produce the helicity xsecs input
 run step 1 WITHOUT --helicityXsecsFile, then:
 python scripts/rabbit/make_helicity_xsecs_file.py \
     mz_5TeV_scetlib_dyturbo_LatticeNP_CT18Z_N3p0LL_N2LO_Corr.hdf5 \
     -o . --outname w_z_helicity_xsecs_5TeV
 
-How it works:
+### Explanation
+
 - theory_corr_weight_map in theory_corrections.py has entries for our exact
   corrections (scetlib_dyturbo_LatticeNP_CT18Z_N3p0LL_N2LO_pdfvars and _pdfas).
   For corrections in that map, define_theory_corr_weight_column builds a
@@ -181,8 +176,67 @@ How it works:
   templates have negligible noise in the 2D binning, so this adds nothing here.
 When to revisit: if you ever move the fit to the finer angular observables (the 4D cosÎ¸*/Ï* setup from the earlier study) â there per-bin statistics drop sharply and this smoothing becomes genuinely useful, alongside the --factorizeSystAxes option that already exists as a lighter-weight version of the same idea.
 
-When scarekit bootstrap hits 100/100:
-   cp /work/submit/hayden17/muonscarekit/code/output/hists/2017_LowPU/Z/uncertainties/stat/{scale_step3_correction_uncertainty.root,resolution_uncertainty.root} \
-      wremnants-data/data/lowPU/muonscarekit/
-   then rerun steps 1, 3, 4. (Check progress:
-   ls muonscarekit/code/output/hists/2017_LowPU/Z/condor/stat/*/step4_k.root | wc -l)
+### Status
+
+IMPLEMENTED (all in the blinded Asimov fit; sigma(alpha_s) = 1.229 units = 0.0025)
+
+  Theory
+  [x] SCETlib+DYturbo central correction (LatticeNP_CT18Z_N3p0LL_N2LO)
+  [x] alpha_s variation = the POI (SCETlib at 0.116/0.118/0.120, consistent
+      CT18Z members; helicity-complete via LHE weights, no double counting)
+  [x] PDF uncertainties: 29 CT18Z eigenvector pairs (helicity-complete)
+  [x] SCETlib resummation: 10 TNPs + 3 gamma-NP eigenvariations
+  [x] SCETlib non-perturbative: Lambda2, Lambda4, Delta_Lambda2
+  [x] Transition points + FO scale envelopes
+  [x] Helicity-decomposed QCD scales on A_0..A_7 (89 nuisances; sigma_UL
+      deliberately excluded -> owned by SCETlib groups; CONFIRM w/ supervisor)
+  [x] Parton shower on angular coeffs (LHE vs pre-FSR, helicity_shower_kt)
+  [x] mZ: massShiftZ2p1MeV from MEParamWeight (impact 0.0008 units)
+
+  Experiment
+  [x] Muon momentum calibration (scarekit scale + resolution)
+  [x] Muon calibration STAT uncertainties (bootstrap; muonScaleStat/muonResStat,
+      impact 0.054 units) - final 100-variation inputs land tonight
+  [x] Prefiring: muon stat + muon syst + ECAL variations (Jul 9)
+  [x] GammaZ width (widthZ2p3MeV, PDG +-2.3 MeV) + sin2theta_eff
+      (sin2thetaZ0p00003) from MEParamWeightAltSet1/4 (Jul 9)
+  [x] Luminosity 1.9%
+  [x] Background normalizations (5% Ztautau / 10% other)
+  [x] MC template stat (bin-by-bin, automatic)
+
+  Checks done
+  [x] Template-noise diagnostic (rebin x2: binByBinStat flat at 0.044 -> PDF
+      "ByHelicity" smoothing not needed at 2D binning)
+  [x] 4D angular fit understood (acceptance leakage; stay 2D for now)
+
+TO DO (rough priority order)
+
+  [ ] 1. Pseudodata bias tests before unblinding: fit pseudodata built from
+         alternative models (different PDF set / resummation / generator) and
+         check the alpha_s bias vs the quoted uncertainty. Most important
+         open item; tensor-level work only.
+  [ ] 2. Muon efficiency SFs (trigger/ID/iso/reco) + uncertainties: currently
+         NOT applied at all (nominal weight = gen weight x prefiring x theory
+         corr). 13 TeV has full machinery, but 2017G @ 5 TeV needs its own SF
+         measurement -> discuss scope with supervisor.
+  [~] 3. Muon calibration SYST uncertainties: scarekit --syst 3 (10 step-3
+         scale mass-window variations) and --syst 4 (21 step-4 resolution
+         window variations) LAUNCHED Jul 9 05:06 on submit05
+         (/work/submit/hayden17/run_syst_uncertainties.sh, log syst_uncs.log,
+         resumable, auto-aggregates into uncertainties/3/ and /4/).
+         Afterwards: copy into wremnants-data + add muonScaleSyst/muonResSyst
+         nuisances analogous to the stat ones.
+  [x] 4. Prefiring completeness: DONE Jul 9 (prefiringMuonSyst + prefiringECAL
+         nuisances; prefire_variation axis now has 6 entries).
+  [x] 5. GammaZ width + sin2theta nuisances: DONE Jul 9 (widthZ2p3MeV +
+         sin2thetaZ0p00003; impact numbers with tonight's production rerun).
+  [ ] 6. Pileup reweighting + uncertainty: not applied; tiny at low PU ->
+         either add or write the one-line justification.
+  [ ] 7. EW/FSR uncertainties (PHOTOS variations, virtual EW): small for ptll
+         shape, nonzero for mll-window acceptance; decide with supervisor.
+  [ ] 8. Housekeeping: move w_z_helicity_xsecs_5TeV.hdf5 into wremnants-data;
+         confirm helicity -1 (sigma_UL) exclusion convention with supervisor.
+
+  Not needed (13 TeV items that don't apply): data-driven QCD/nonprompt
+  backgrounds (clean dimuon), recoil calibration (no MET), charge/channel
+  decorrelation (single Z channel), unfolding / theory-agnostic modes.
