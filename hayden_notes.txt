@@ -95,10 +95,6 @@ cp hayden_notes.txt ../wremnants-notes/ && git -C ../wremnants-notes commit -am 
  scetlib_dyturbo_LatticeNP_CT18Z_N3p0LL_N2LO_CorrZ.pkl.lz4          - central + 50 SCETlib variations
  scetlib_dyturbo_LatticeNP_CT18Z_N3p0LL_N2LO_pdfas_CorrZ.pkl.lz4    - alpha_s 0.116/0.118/0.120
  scetlib_dyturbo_LatticeNP_CT18Z_N3p0LL_N2LO_pdfvars_CorrZ.pkl.lz4  - 58 CT18Z eigenvectors
-Backups/legacy in the same dir:
- *_jul10_coarsebins.pkl.lz4.bak     - my Jul 10 remake, coarse absY (same physics)
- scetlib_dyturboLatticeNP_* (Jan 16) - David's originals (NNPDF31 proxy
-    denominators -> pdfas variation artificially small; superseded Jul 10)
 
 Prefiring: not a separate file â the L1PreFiringWeight_Muon_Nom/StatUp/StatDn branches inside the NanoAOD events themselves:
 /scratch/submit/cms/wmass/NanoAOD/LowPU/2017G/SingleMuon/Run2017G-UL2017_MiniAODv2_NanoAODv9_GT36-v2/            (data)
@@ -144,11 +140,6 @@ experiment (1)             â prefiring only
 MC stat                    â bin-by-bin (Barlow-Beeston lite from sumw2)                  
 norm                       â 5% Ztautau / 10% other backgrounds                            
 
-### Implementing with Data
-
-python scripts/rabbit/new_make_tensor.py ... --realData --noNormToData
-rabbit_fit.py ... -t 0 --unblind
-
 ### Quantiles
 
 1. The 13 TeV dilepton (Î±_s-style) fit doesn't use the angles by default. mz_dilepton.py fits --axes mll ptll (plus rapidity variants); the CS angular variables are an option (--csVarsHist), used for angular-coefficient studies and validation â not stuffed into the Î±_s observable for extra precision.
@@ -156,6 +147,7 @@ rabbit_fit.py ... -t 0 --unblind
 3. Your 5 TeV setup has none of that yet â zero efficiency systematics, zero momentum-scale systematics, theory templates with no physical angular content at all. Same trick, but with the detector assumed flawless. That's the entire difference.
 
 So the honest framing for your supervisor isn't "this approach is wrong" â it's: "the 13 TeV analysis earns its angular sensitivity by carrying a complete experimental-systematics model; in my current simplified setup the same construction turns into an unprotected assumption, so I fit ptllâyll until the efficiency and momentum-scale uncertainties are implemented." Which also means the work isn't wasted: the 4D histograms plus the scarekit uncertainties (landing Thursday) and eventually efficiency SFs are exactly the path to legitimately revisiting it â and the factorization switch gives you the A/B test to show how much angular sensitivity you've earned at each step.
+Helicity smoothing revisit: if you ever move the fit to the finer angular observables (the 4D cosÎ¸*/Ï* setup from the earlier study) â there per-bin statistics drop sharply and this smoothing becomes genuinely useful, alongside the --factorizeSystAxes option that already exists as a lighter-weight version of the same idea.
 
 ### One-time (or after MC changes): produce the helicity xsecs input
 
@@ -182,16 +174,10 @@ python scripts/rabbit/make_helicity_xsecs_file.py \
 - The 13 TeV "ByHelicity" histograms are a smoothing device (replace per-event
   LHE weights by gen-binned helicity-moment ratios to suppress MC noise). Our
   templates have negligible noise in the 2D binning, so this adds nothing here.
-When to revisit: if you ever move the fit to the finer angular observables (the 4D cosÎ¸*/Ï* setup from the earlier study) â there per-bin statistics drop sharply and this smoothing becomes genuinely useful, alongside the --factorizeSystAxes option that already exists as a lighter-weight version of the same idea.
 
 ### Status
 
-IMPLEMENTED (all in the blinded Asimov fit)
-  NOTE on sigma(alpha_s): 1.229 units (0.0025) was the Jul 9 quote with the
-  OLD corrections. The Jul 13 remade pdfas corr has a ~4x larger alpha_s
-  response (+-0.54% vs +-0.13%), so sigma drops substantially (a Zmumu-only
-  test fit on the Jul 13 production file gave 0.526 units); official number
-  gets requoted after the calibration rerun + final production.
+IMPLEMENTED
 
   Theory
   [x] SCETlib+DYturbo central correction (LatticeNP_CT18Z_N3p0LL_N2LO)
@@ -247,254 +233,19 @@ TO DO (rough priority order)
 
 ### Borrowed/missing 5 TeV inputs
 
-Calibration-side (muonscarekit only, never enter the fit directly):
-
-1. Pileup weight in the muon calibration (the broken one).
-   Currently using: central UL2017 (13 TeV, <PU>~32) file
-   inputs/jsonpog/POG/LUM/Run2-2017-UL-NanoAODv15/puWeights.json.gz
-   in muonscarekit/code/python/tools/filters.py (baked into the ntuples,
-   used in the MC weight of calibration steps 1-4). At our nTrueInt of
-   0-4 it gives weights 45-1000 (mean 409): shifts the MC mass-window
-   mean by 6.1 MeV, halves effective MC stats.
-   DECIDED (Jul 13): puWeight=1, following the 13 TeV lowPU analysis
-   (mw_lowPU/mz_lowPU apply no PU weight; the high-PU 13 TeV analysis
-   does reweight, but at <PU>~2 the effect is negligible and the
-   borrowed profile was pure pathology). Implemented in
-   muonscarekit/code/python/tools/filters.py (else-branch puWeight now
-   "1"). Re-derivation chain LAUNCHED Jul 13 ~10:08 (setsid-detached,
-   log /work/submit/hayden17/calibration_pufix.log): ntuples done 10:13,
-   nominal 1-4 done 14:23, stat 100-boot running (~2.5 d), then syst 3/4.
-   Also picks up the sf_trg typo fix + SF pt clamps (see item 2).
-   Proceeded with the borrowed 13 TeV SFs (question 2 still open, but
-   SFs mostly cancel in a data/MC-ratio calibration - flagged to David).
-
-2. Muon ID/iso/trigger SFs in the muon calibration.
-   Currently using: central UL2017 (13 TeV) muon POG SFs
-   inputs/jsonpog/POG/MUO/Run2-2017-UL-NanoAODv15/muon_Z.json.gz
-   in the same calibration MC weight (values 0.90-1.02).
-   Jul 13: SF-evaluation pt now clamped in filters.py (max(pt,15) for
-   ID/ISO, max(pt,26) for IsoMu24 trigger SF) - the UL2017 jsons start
-   above where HIMu17 admits muons (crash at pt=22.7 otherwise).
-   Q: measure 2017G-specific SFs, or is closest-available-era OK for a
-   data/MC-ratio-based calibration?
-
-after fixed (Jul 13 status: 1-2 done, 3 running, 4-5 pending):
-1. Regenerate the scarekit ntuples (preprocessing step)
-2. Rerun the nominal calibration (steps 1â4)
-3. Rerun the stat bootstrap (100 jobs, ~2.5 days at 16-parallel)
-4. Rerun the syst 3/4 campaigns (~30 h)
-5. Copy the new uncertainty files into wremnants-data, rerun histmaker â tensor â fit
-
-Fit-side (WRemnants):
-
-3. Muon efficiency SFs in the fit itself.
-   Currently using: NONE in scripts/histmakers/mz_5TeV.py (nominal
-   weight = gen weight x prefiring x theory corr; normalization absorbed
-   by the lumi-constrained yield).
-   Q: measure 2017G trigger/ID/iso/reco SFs + uncertainties (13 TeV
-   machinery exists in muon_efficiencies_smooth.py but its inputs are
-   13 TeV-measured), or conservative shape uncertainty / justified
-   omission for a ptll-yll shape fit?
-
-4. Prefiring maps in the fit.
-   Currently using: L1PreFiringWeight_* branches baked into the NanoAOD
-   by central production (2017 maps measured in 13 TeV running), in
-   mz_5TeV.py nominal weight + 3 nuisances (muon stat/syst, ECAL).
-   Q: 2017G-specific maps needed, or central treatment fine (per-object
-   probabilities, ~PU-independent)?
-
-5. Pileup reweighting in the fit.
-   Currently using: NONE in mz_5TeV.py; wremnants-data/data/
-   pileupProfiles/ has no 2017G profile (only 2016/2017UL/2018).
-   Q: create a 2017G data PU profile (brilcalc/pileupCalc with the 2017G
-   lumi JSON), or justify-and-skip at <PU>~2?
-
-6. EW/FSR corrections.
-   Currently using: NONE; available files (horacenloewCorrZ,
-   horaceqedew_FSR_CorrZ, pythiaew_ISR_CorrZ, powhegFOEW_CorrZ in
-   wremnants-data/data/TheoryCorrections/) are all 13 TeV-derived, none
-   in 5020GeV/, and no FSR-alternative samples exist (pythia8-photos
-   only).
-   Q: produce 5 TeV EW corrections, borrow the 13 TeV ratios as
-   ~energy-independent, or skip with justification for a ptll shape fit?
-
-7. (Smaller) Luminosity and background normalizations.
-   Currently using: hardcoded 1.9% lumi + 5%/10% background norms in
-   scripts/rabbit/new_make_tensor.py. 1.9% believed to match LUM-19-001
-   (2017 5.02 TeV) - verify citation; background norms are conservative
-   guesses.
-   Q: proper derivations needed, or fine at their impact level (lumi
-   0.46 units is the leading experimental term; backgrounds negligible)?
-
-Not needed (13 TeV items that don't apply): data-driven QCD/nonprompt
-  backgrounds (clean dimuon), recoil calibration (no MET), charge/channel
-  decorrelation (single Z channel), unfolding / theory-agnostic modes.
-
-================================================================
-PSEUDODATA BIAS TESTS (Jul 9)  --  TO DO item 1: DONE
-================================================================
-Question: if the true underlying physics differs from the nominal model,
-does the alpha_s fit come back biased by more than the quoted uncertainty?
-Method: build the tensor with an alternative-model template as the "data"
-(new_make_tensor.py --pseudoData HIST [--pseudoDataEntry LABEL]), fit the
-UNCHANGED nominal model to it, read off the fitted pdfAlphaS shift.
-All pseudodata is MC -- blinding is preserved.
-
-Results (1 unit = 0.002 in alpha_s; quoted Asimov sigma = 1.229 units):
-
-  test                     injected truth                     fitted alpha_s
-  closure_nominal          nominal template itself            +0.0000  (exact)
-  alphas_up_0120           alpha_s = 0.120 (+1 unit)          +1.0067
-  alphas_dn_0116           alpha_s = 0.116 (-1 unit)          -0.9933
-  pdf19                    CT18Z member 19                    -0.3295
-  pdf20                    CT18Z member 20                    +0.3483
-  flavdep_lambda2_05       NP lambda2 = 0.5                   +0.6231
-  flavdep_lambda2_00       NP lambda2 = 0.0                   +0.0246
-  flavdep_lambda4_016      NP lambda4 = 0.16                  -0.3549
-  ptdep_resum_scale_up     resum-scale envelope Up            +0.2766
-  ptdep_trans_scale_up     transition-scale envelope Up       +0.2766 (*)
-  minnlo_uncorr            raw MiNNLO (no SCETlib corr)       -2.4952
-
-Conclusions:
-- Closure is exact and the injected alpha_s variations are recovered to
-  <0.01 units (0.7%): the fit machinery is unbiased on in-model truth.
-- In-model systematic templates (PDF members, NP parameters, pt-dep
-  scales) bias alpha_s by 0.02-0.62 units, all well inside the quoted
-  1.229 -- the corresponding nuisances absorb them as designed.
-- Raw MiNNLO pseudodata gives -2.50 units (2 sigma). This is the most
-  extreme "wrong theory" case (LO+PS ptll shape vs N3LL+NNLO); a shift
-  larger than sigma is expected and is why the SCETlib correction is
-  applied in the first place. Not a concern for unblinding.
-- (*) the resum-scale and transition-scale envelope Up templates are
-  bit-identical in the production PtDepScales histogram (the SCETlib
-  envelope construction coincides) -- one test, listed twice.
-
-IMPORTANT rabbit gotcha discovered on the way:
-- rabbit_fit.py -t 0 (fit stored data) automatically BLINDS unconstrained
-  NOI parameters: it adds a deterministic pseudorandom offset (hash of the
-  parameter name, sigma=5) -- for "pdfAlphaS" the offset is +1.4211, so a
-  perfect closure fit reports -1.4211. This is rabbit's built-in blinding
-  for data fits (fitter.py init_blinding_values). Pass --unblind (all) or
-  --unblind pdfAlphaS to remove it. Safe for MC pseudodata; for REAL data
-  the offset is different (name+"_data" hash) and must stay ON until the
-  unblinding decision.
-- Asimov fits (-t -1) are never blinded (toy is generated from the model,
-  fit trivially returns 0).
-
-Reproduce: bash /work/submit/hayden17/pseudodata_tests_jul9/run_suite.sh
-(inside the singularity container; ~5 min per test).
-Outputs: /work/submit/hayden17/pseudodata_tests_jul9/
-  t_<tag>.hdf5, fitresults_<tag>.hdf5, log_<tag>.txt
-
-Also fixed in new_make_tensor.py (Jul 9, relevant if backgrounds are ever
-added): Asimov data is now the SUM of all MC processes (was: first process
-only -- identical today since Zmumu_2017G is the only proc), and
---pseudoData replaces only the signal component, keeping other processes
-at nominal.
-
-================================================================
-THEORY CORRECTIONS REMAKE (Jul 10) -- per David's instructions
-================================================================
-
-Why: David's correction files (Jan 16) used a MiNNLO denominator gen file
-made with NNPDF3.1 (w_z_gen_dists_nnpdf31.hdf5) because the NanoAOD did not
-yet have the right PDF weights. The PDFExt NanoAOD has proper CT18Z LHE
-weights (LHEPdfWeightAltSet11), so the denominators of the pdfas/pdfvars
-corrections can now be made with the matching CT18Z variations.
-
-Physics impact (central region absY<2, qT<30, ratio to central):
-  pdfas as_0116/as_0120 variation:  +-0.54%  (was +-0.13% -- the NNPDF31-as
-      denominator was cancelling most of the alpha_s dependence,
-      inconsistent with the CT18Z LHE weights applied in the histmaker)
-  pdfvars: member-by-member changes up to ~0.4% (e.g. pdf20); previously
-      each CT18Z member was divided by an unrelated NNPDF31 member
-  nominal: identical variation structure (same SCETlib numerators), ~1%
-      normalization shift (absorbed by the lumi-constrained yield)
-  NOTE: the corr binning follows this fork's gen binning (absY 11 bins /
-      qT 31 bins, reco-quantile based) vs David's Jan checkout (16/29) --
-      expected, not a bug.
-
-Recipe (all commands inside the singularity + source setup.sh):
-
-1. Gen histmaker with CT18Z (output /work/submit/hayden17/theory_corr_jul10):
-   python scripts/histmakers/w_z_gen_dists.py -o <outdir> \
-       --dataPath /scratch/submit/cms/wmass/NanoAOD/ --era 2017G \
-       --filterProcs Zmumu_2017G Ztautau_2017G --pdfs ct18z -j 16
-   (needed dataDict_extended = dataDict alias in datasetDict_2017G.py: the
-   gen histmaker requests the "extended" dict; at 5 TeV the only production
-   IS the PDF-extended one)
-   -> w_z_gen_dists.hdf5 with nominal_gen, nominal_gen_pdfCT18Z (59 members),
-      nominal_gen_pdfCT18ZalphaS002 (as0118/as0116/as0120)
-
-2. make_theory_corr.py, one command per file (David's -c inputs verbatim,
-   they are readable under /home/submit/david_w/work/TheoryCorrections/):
-   nominal:  -m <genfile> -g scetlib_dyturbo --proc z --eras 2017G --axes Y qT \
-       -c <lattice pkl> <lattice_nnlo_sing pkl> <DYTURBO scalevariations pattern> \
-       -p "LatticeNP_CT18Z_N3p0LL_N2LO" --outpath <dir>
-   pdfas:    same + pdfas SCETlib pkls, --minnloh nominal_gen_pdfCT18ZalphaS002
-       DYTurbo: the pdfas member{i} layout changed since January -- built a
-       symlink dir (theory_corr_jul10/dyturbo_as_links) mapping member0/1/2 ->
-       CT18ZNNLO member0 central / CT18ZNNLO_as_0116 / CT18ZNNLO_as_0120
-   pdfvars:  same + pdfvars SCETlib pkls, --minnloh nominal_gen_pdfCT18Z,
-       DYTurbo CT18ZNNLO member{i} pattern (still valid)
-   (check any file's provenance anytime: python scripts/inspect/print_command.py <file>)
-
-3. Installed: the three scetlib_dyturbo_LatticeNP_CT18Z_N3p0LL_N2LO*_CorrZ.pkl.lz4
-   in wremnants-data/data/TheoryCorrections/5020GeV/ are now MY remade files
-   (were symlinks to David's legacy-named scetlib_dyturboLatticeNP* files,
-   which are still there untouched). load_corr_hist_5020 in mz_5TeV.py now
-   tries the standard keys (proc "Z") first, then David's legacy keys.
-
-4. Production rerun with the new corrections Jul 10 (~10:15). Backups:
-   theory_corr_jul10/production_jul10_0804_oldcorr_backup.hdf5 (final scarekit
-   stat+syst files but OLD corrections), pseudodata_tests_jul9/
-   production_jul9_backup.hdf5 (prelim stat, old corrections).
-
-================================================================
-CALIBRATION RERUN (puWeight=1) + HELICITY SMOOTHING CHECK (Jul 13)
-================================================================
-Calibration re-derivation launched (setsid, log
-/work/submit/hayden17/calibration_pufix.log, driver
-/work/submit/hayden17/rerun_calibration_pufix.sh):
-ntuples (puWeight=1) -> nominal 1-4 -> stat 100-boot -> syst3/4.
-Old 13TeV-PU outputs archived as .../Z_13tevpu_jul13bak (both the
-ntuple dir and code/output/hists dir). ~3-4 days total.
-GOTCHA found on first launch: the sf_trg typo fix exposed an
-out-of-bounds crash - the UL2017 IsoMu24 trigger SF json starts at
-pt=26 GeV but HIMu17 admits lower-pt muons (crash at 22.7). Fixed in
-filters.py by clamping SF-evaluation pt: max(pt,15) for ID/ISO,
-max(pt,26) for trigger (borrowed SFs anyway; open question 2).
-
-Helicity smoothing (David: "may need to smoothen them via the
-helicities, have you checked if this matters?"):
- - QCD scales ALREADY by-helicity (ptll_qcdScaleByHelicity tensor,
-   89 nuisances).
- - PDF/alpha_s variations are raw LHE-weight-based. Measured the MC
-   noise (2nd-difference rms of variation/nominal vs ptll, current
-   production file): alpha_s vars ~3e-4, pdf members ~1e-4,
-   qcdScaleByHelicity 1e-5..1e-3. Compare: median data stat error
-   per ptll bin = 2.1e-2, template signals 0.4-8%. Noise is ~100x
-   below the fit's resolving power -> helicity-smoothing the PDF/as
-   variations would not measurably change sigma(alpha_s) at our
-   stats/binning. The 13 TeV motivation (very fine 3D binning, W
-   samples needing boson-parametrized weights) doesn't apply to a
-   Z-only ptll shape fit with native LHE weights.
-   Checker: scratchpad noise_check.py / noise_check2.py pattern.
- - DEFINITIVE TEST DONE (Jul 13, David's recipe AN-25-085 4.1.1):
-   reran mz_5TeV.py with --oneMCfileEveryN 2 (flag added to the
-   script; was highPU-only), then identical blinded Asimov fits
-   (tensor + rabbit_fit -t -1) on full-MC and half-MC inputs.
-   Outputs /work/submit/hayden17/halfmc_test/fit_{full,half}/.
-   RESULT: NO spurious constraints. Of 267 shared nuisances, ZERO
-   tighten by >2% with half MC (worst: pdf33_34SymAvg -0.1%,
-   i.e. noise). Everything is stable or LOOSER with half MC (the
-   honest direction - BB-lite MC-stat term growing):
-     sigma(pdfAlphaS): 0.5262 (full) -> 0.5438 (half), +3.4%
-     pdf SymAvg nuisances: +0.1..1.5% looser
-     qcdScaleHelicity0/2 SymAvg: +1..5% looser
-     helicity_shower_kt: 0.440 -> 0.561 (+27%, most MC-stat
-       sensitive nuisance, but loosens = genuine, not spurious)
-   The 13 TeV failure mode (constraints TIGHTENING with half MC
-   because the fit constrains against template noise) is absent.
-   => helicity smoothing of PDF/alpha_s variations NOT needed for
-   the 5 TeV Z fit; test documented for the AN.
+  [ ] A. Muon efficiency SFs in the fit + nuisances (HLT/ISO/IDIP stat+syst
+         a la setupRabbit.py; 13 TeV lowPU carries 10 nuisance sets, we
+         have zero). Needs 2017G tag-and-probe SFs or a justified borrow
+         with an uncertainty. Same fix would feed the calibration SFs
+         (borrowed item below).
+  [ ] B. EW/FSR corrections: nothing in 5020GeV/; borrow the 13 TeV
+         ratios, produce 5 TeV ones, or skip with justification.
+  [ ] C. Background templates in the fit: production hdf5 currently has
+         ONLY SingleMuon + Zmumu (verified Jul 13) -> fit is signal-only
+         and the 5%/10% norm nuisances have nothing to act on. Machinery
+         is ready (dataset dict has Ztautau/Wplusmunu/Wminusmunu/
+         Wminustaunu_2017G; tensor auto-adds norms; Jul 9 Asimov
+         sum-of-procs fix). Just rerun the histmaker without the
+         Zmumu-only filter. No ttbar/diboson 2017G samples in the dict -
+         ask David if they exist. Negligible for Asimov sigma; required
+         before fitting real data.
