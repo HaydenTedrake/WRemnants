@@ -96,7 +96,11 @@ cp hayden_notes.txt ../wremnants-notes/ && git -C ../wremnants-notes commit -am 
  scetlib_dyturbo_LatticeNP_CT18Z_N3p0LL_N2LO_pdfas_CorrZ.pkl.lz4    - alpha_s 0.116/0.118/0.120
  scetlib_dyturbo_LatticeNP_CT18Z_N3p0LL_N2LO_pdfvars_CorrZ.pkl.lz4  - 58 CT18Z eigenvectors
 
-Prefiring: not a separate file â the L1PreFiringWeight_Muon_Nom/StatUp/StatDn branches inside the NanoAOD events themselves:
+Prefiring: REMOVED Jul 14 (supervisor: non-issue in 2017G). The
+L1PreFiringWeight_* branches are no longer used; all prefiring code
+deleted from mz_5TeV.py and new_make_tensor.py (git history has it).
+
+NanoAOD sample locations:
 /scratch/submit/cms/wmass/NanoAOD/LowPU/2017G/SingleMuon/Run2017G-UL2017_MiniAODv2_NanoAODv9_GT36-v2/            (data)
 /scratch/submit/cms/wmass/NanoAOD/DYJetsToMuMu_H2ErratumFix_PDFExt_TuneCP5_5020GeV-powhegMiNNLO-pythia8-photos/NanoV9MC2017_TrackFitV722_NanoProdv3/   (Zmumu MC)
 (dataset definitions with all sample paths: wremnants/production/datasets/datasetDict_2017G.py)
@@ -136,7 +140,8 @@ pdfCT18Z (58)              â 29 eigenvector pairs, Ã 1/1.645 CL conversi
 resumNonpert (3)           â Lambda2, Lambda4, Delta_Lambda2                                       
 resumTNP (13)              â 3 gamma-NP eigenvariations + 10 theory nuisance parameters            
 resumTransitionFOScale (4) â transition points + FO pt20 scale envelope                           
-experiment (1)             â prefiring only                                                         
+muonCalibration (4)        â muonScale/ResStat + muonScale/ResSyst (scarekit)
+angularCoeffs (90)         â helicity QCD scales (89) + helicity_shower_kt
 MC stat                    â bin-by-bin (Barlow-Beeston lite from sumw2)                  
 norm                       â 5% Ztautau / 10% other backgrounds                            
 
@@ -197,7 +202,7 @@ IMPLEMENTED
   [x] Muon calibration STAT uncertainties (bootstrap; muonScaleStat/muonResStat,
       impact 0.054 units) - final 100-variation files landed Jul 9-10;
       being re-derived with puWeight=1 (Jul 13 chain)
-  [x] Prefiring: muon stat + muon syst + ECAL variations (Jul 9)
+  [-] Prefiring: removed Jul 14 (supervisor: non-issue in 2017G)
   [x] GammaZ width (widthZ2p3MeV, PDG +-2.3 MeV) + sin2theta_eff
       (sin2thetaZ0p00003) from MEParamWeightAltSet1/4 (Jul 9)
   [x] Luminosity 1.9%
@@ -211,41 +216,35 @@ IMPLEMENTED
   [x] Half-vs-full MC test (AN-25-085 4.1.1, Jul 13): no spurious
       constraints, helicity smoothing of PDF/alpha_s NOT needed (see
       CALIBRATION RERUN + HELICITY SMOOTHING section)
+  [x] Pseudodata bias tests (Jul 9): closure exact, injected +-1 unit
+      alpha_s recovered <1% (see PSEUDODATA BIAS TESTS section)
 
-TO DO (rough priority order)
+IN PROGRESS
 
-  [x] 1. Pseudodata bias tests before unblinding: DONE Jul 9 -- closure exact,
-         injected +-0.002 alpha_s recovered to <1%, in-model templates bias
-         by <=0.62 units (<< sigma=1.229), raw MiNNLO worst case -2.50 (2sig).
-         See "PSEUDODATA BIAS TESTS (Jul 9)" section at the bottom.
-         NOTE: rabbit -t 0 auto-blinds pdfAlphaS (offset +1.4211); use
-         --unblind for MC pseudodata fits only.
-  [x] 3. Muon calibration SYST uncertainties: DONE Jul 9-10 (syst3 10/10,
-         syst4 21/21 aggregated; muonScaleSyst/muonResSyst nuisances in
-         new_make_tensor.py, files in wremnants-data). Being re-derived
-         with puWeight=1 (Jul 13 chain) like the stat ones.
-  [x] 4. Prefiring completeness: DONE Jul 9 (prefiringMuonSyst + prefiringECAL
-         nuisances; prefire_variation axis now has 6 entries).
-  [x] 5. GammaZ width + sin2theta nuisances: DONE Jul 9 (widthZ2p3MeV +
-         sin2thetaZ0p00003; impact numbers with tonight's production rerun).
-  [ ] 8. Housekeeping: move w_z_helicity_xsecs_5TeV.hdf5 into wremnants-data;
-         confirm helicity -1 (sigma_UL) exclusion convention with supervisor.
+  [~] puWeight=1 calibration re-derivation (launched Jul 13, detached;
+      log calibration_pufix.log). Nominal done; stat bootstrap running
+      (~Jul 16), then syst3/4 (~30 h). Then: copy files to
+      wremnants-data/data/lowPU/muonscarekit/ -> final production rerun
+      -> tensor -> blinded Asimov fit (-t -1).
+  [~] Production rerun with backgrounds, prefiring-free (launched Jul 14;
+      log production_jul14_backgrounds.log). All 7 procs: data, Zmumu +
+      the 5 backgrounds. Interim (still Jul 10 calibration) - lets us
+      wire up the background norms in the tensor before the final rerun.
 
 ### Borrowed/missing 5 TeV inputs
 
+(reported to supervisor Jul 13; his answers folded in)
+
   [ ] A. Muon efficiency SFs in the fit + nuisances (HLT/ISO/IDIP stat+syst
          a la setupRabbit.py; 13 TeV lowPU carries 10 nuisance sets, we
-         have zero). Needs 2017G tag-and-probe SFs or a justified borrow
-         with an uncertainty. Same fix would feed the calibration SFs
-         (borrowed item below).
-  [ ] B. EW/FSR corrections: nothing in 5020GeV/; borrow the 13 TeV
-         ratios, produce 5 TeV ones, or skip with justification.
-  [ ] C. Background templates in the fit: production hdf5 currently has
-         ONLY SingleMuon + Zmumu (verified Jul 13) -> fit is signal-only
-         and the 5%/10% norm nuisances have nothing to act on. Machinery
-         is ready (dataset dict has Ztautau/Wplusmunu/Wminusmunu/
-         Wminustaunu_2017G; tensor auto-adds norms; Jul 9 Asimov
-         sum-of-procs fix). Just rerun the histmaker without the
-         Zmumu-only filter. No ttbar/diboson 2017G samples in the dict -
-         ask David if they exist. Negligible for Asimov sigma; required
-         before fitting real data.
+         have zero). SUPERVISOR: we will have to DERIVE them - talk to
+         David and Jan, both working on methods for this. The same SFs
+         would feed the calibration's borrowed ID/iso/trigger SFs.
+  [ ] B. EW/FSR corrections: nothing in 5020GeV/. SUPERVISOR: need to
+         PRODUCE them (not borrow/skip). Figure out the recipe - 13 TeV
+         uses horacenloew / horaceqedew_FSR / pythiaew_ISR / powhegFOEW
+         ratio files; ask what tooling exists for 5 TeV.
+
+Still open sign-offs: lumi 1.9% citation (LUM-19-001?) | same-sign dimuon fakes check before
+real data (one-off validation) | housekeeping: move
+w_z_helicity_xsecs_5TeV.hdf5 into wremnants-data
