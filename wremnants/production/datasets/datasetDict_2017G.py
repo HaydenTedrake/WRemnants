@@ -51,13 +51,13 @@ dataDict = {
         "xsec": xsec_WminusJetsToLL,
         "group": "Wmunu",
     },
-    # "Wplustaunu2017G": {
-    #     "filepaths": [
-    #         "{BASE_PATH}/WplusJetsToTauNu_TauToMuorE_H2ErratumFix_PDFExt_TuneCP5_5020GeV-powhegMiNNLO-pythia8-photos/RunIISummer20UL17pp5TeVNanoAODv9-106X_mc2017_realistic_forppRef5TeV_v3-v2",
-    #     ],
-    #     "xsec": xsec_WplusJetsToLNu * (common.BR_TAUToMU + common.BR_TAUToE),
-    #     "group": "Wtaunu",
-    # },
+    "Wplustaunu_2017G": {
+        "filepaths": [
+            "{BASE_PATH}/WplusJetsToTauNu_TauToMuorE_H2ErratumFix_PDFExt_TuneCP5_5020GeV-powhegMiNNLO-pythia8-photos/NanoV9MC2017_TrackFitV722_NanoProdv3",
+        ],
+        "xsec": xsec_WplusJetsToLNu * (common.BR_TAUToMU + common.BR_TAUToE),
+        "group": "Wtaunu",
+    },
     "Wminustaunu_2017G": {
         "filepaths": [
             "{BASE_PATH}/WminusJetsToTauNu_TauToMuorE_H2ErratumFix_PDFExt_TuneCP5_5020GeV-powhegMiNNLO-pythia8-photos/NanoV9MC2017_TrackFitV722_NanoProdv3",
@@ -66,3 +66,8 @@ dataDict = {
         "group": "Wtaunu",
     },
 }
+
+# The 2017G MC production is PDF-extended by construction (PDFExt samples
+# carry the full LHEPdfWeightAltSet* branches, incl. CT18Z in AltSet11),
+# so the extended dataset dict is the same as the default one.
+dataDict_extended = dataDict

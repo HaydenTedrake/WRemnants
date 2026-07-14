@@ -86,6 +86,46 @@ TFile *tf_k =
     TFile::Open("wremnants-data/data/lowPU/muonscarekit/step4_k.root", "READ");
 TH2D *h_k_data = (TH2D *)tf_k->Get("k_hist_DATA");
 TH2D *h_k_sig = (TH2D *)tf_k->Get("k_hist_SIG");
+
+// Bootstrap (statistical) uncertainties of the corrections; optional inputs,
+// variations are disabled (return nominal) when the files are absent.
+// Contents follow muonscarekit python/corrections/uncertainties.py: bin error
+// = bootstrap std of the sim->data kappa (M) / lambda (A) corrections and of
+// the resolution factor k; "correlation" holds the per-bin M-A correlation.
+TFile *tf_scale_unc = TFile::Open("wremnants-data/data/lowPU/muonscarekit/"
+                                  "scale_step3_correction_uncertainty.root",
+                                  "READ");
+TH2D *h_M_unc = tf_scale_unc ? (TH2D *)tf_scale_unc->Get("M") : nullptr;
+TH2D *h_A_unc = tf_scale_unc ? (TH2D *)tf_scale_unc->Get("A") : nullptr;
+TH2D *h_rho_unc =
+    tf_scale_unc ? (TH2D *)tf_scale_unc->Get("correlation") : nullptr;
+
+TFile *tf_res_unc = TFile::Open(
+    "wremnants-data/data/lowPU/muonscarekit/resolution_uncertainty.root",
+    "READ");
+TH1D *h_k_unc = tf_res_unc ? (TH1D *)tf_res_unc->Get("k_hist") : nullptr;
+
+// Systematic uncertainties of the corrections, same file layout as the
+// bootstrap ones: scale from the scarekit --syst 3 campaign (spread of the
+// step3 kappa/lambda corrections over scale-fit mass-window variations),
+// resolution from --syst 4 (spread of k over resolution-fit window
+// variations). Optional inputs like the stat ones.
+TFile *tf_scale_unc_syst =
+    TFile::Open("wremnants-data/data/lowPU/muonscarekit/"
+                "syst3_scale_step3_correction_uncertainty.root",
+                "READ");
+TH2D *h_M_unc_syst =
+    tf_scale_unc_syst ? (TH2D *)tf_scale_unc_syst->Get("M") : nullptr;
+TH2D *h_A_unc_syst =
+    tf_scale_unc_syst ? (TH2D *)tf_scale_unc_syst->Get("A") : nullptr;
+TH2D *h_rho_unc_syst =
+    tf_scale_unc_syst ? (TH2D *)tf_scale_unc_syst->Get("correlation") : nullptr;
+
+TFile *tf_res_unc_syst = TFile::Open(
+    "wremnants-data/data/lowPU/muonscarekit/syst4_resolution_uncertainty.root",
+    "READ");
+TH1D *h_k_unc_syst =
+    tf_res_unc_syst ? (TH1D *)tf_res_unc_syst->Get("k_hist") : nullptr;
 } // namespace muonscarekit_impl
 
 Vec_f applyMuonScarekitData(Vec_f pt, Vec_f eta, Vec_f phi, Vec_i charge) {
@@ -100,11 +140,53 @@ Vec_f applyMuonScarekitData(Vec_f pt, Vec_f eta, Vec_f phi, Vec_i charge) {
   return res;
 }
 
+// Scale (kappa/lambda) statistical variation on the fully corrected MC pt,
+// following muonscarekit apply_corrections.uncertainties: the pt shift from
+// the bootstrap stds of M and A with their per-bin correlation,
+// delta(pt) = pt^2 * sqrt(dM^2/pt^2 + dA^2 + 2*q*rho*dM*dA/pt).
+// updn = +1/-1 selects the up/down variation; syst=true reads the syst3
+// (mass-window) spread instead of the bootstrap one; nominal pt is returned
+// when the uncertainty file is not available.
+Vec_f varyMuonScarekitScaleMC(Vec_f pt_corr, Vec_f eta, Vec_f phi, Vec_i charge,
+                              double updn, bool syst = false) {
+  using namespace muonscarekit_impl;
+  TH2D *hM = syst ? h_M_unc_syst : h_M_unc;
+  TH2D *hA = syst ? h_A_unc_syst : h_A_unc;
+  TH2D *hR = syst ? h_rho_unc_syst : h_rho_unc;
+  unsigned int size = pt_corr.size();
+  Vec_f res(size);
+  for (unsigned int i = 0; i < size; ++i) {
+    if (hM == nullptr || hA == nullptr || hR == nullptr) {
+      res[i] = pt_corr[i];
+      continue;
+    }
+    const int etabin = hM->GetXaxis()->FindBin(eta[i]);
+    const int phibin = hM->GetYaxis()->FindBin(phi[i]);
+    const double dM = hM->GetBinError(etabin, phibin);
+    const double dA = hA->GetBinError(etabin, phibin);
+    const double rho = hR->GetBinContent(etabin, phibin);
+    const double pt = pt_corr[i];
+    const double num =
+        dM * dM / (pt * pt) + dA * dA + 2.0 * charge[i] * rho * dM / pt * dA;
+    const double dpt = pt * pt * std::sqrt(std::max(num, 0.0));
+    res[i] = static_cast<float>(pt + updn * dpt);
+  }
+  return res;
+}
+
 class MuonScarekitMCHelper {
 
 public:
-  MuonScarekitMCHelper(const std::size_t seed = 0)
-      : hash_(std::hash<std::string>()("MuonScarekitMCHelper")), seed_(seed) {}
+  // k_unc_shift shifts the MC smearing factor k by that many stds of the
+  // stat (bootstrap, resolution_uncertainty.root) or, with k_unc_syst=true,
+  // syst4 (window-variation) uncertainty; the per-event RNG seeding
+  // guarantees the same smearing random number as the nominal helper, so the
+  // shifted helper yields a consistent resolution up/down variation.
+  MuonScarekitMCHelper(const std::size_t seed = 0,
+                       const double k_unc_shift = 0.0,
+                       const bool k_unc_syst = false)
+      : hash_(std::hash<std::string>()("MuonScarekitMCHelper")), seed_(seed),
+        k_unc_shift_(k_unc_shift), k_unc_syst_(k_unc_syst) {}
 
   // Per-event seeding (run, lumi, event): reproducible across runs and thread
   // counts, and thread-safe (RNG is local to each call). Mirrors
@@ -149,6 +231,13 @@ public:
                         ? sqrt(k_data_v * k_data_v - k_sig_v * k_sig_v)
                         : 0.0;
 
+      TH1D *h_k_unc_src = k_unc_syst_ ? h_k_unc_syst : h_k_unc;
+      if (k_unc_shift_ != 0.0 && k_mc > 0.0 && h_k_unc_src != nullptr) {
+        const int kbin = h_k_unc_src->GetXaxis()->FindBin(fabs((double)eta[i]));
+        k_mc =
+            std::max(0.0, k_mc + k_unc_shift_ * h_k_unc_src->GetBinError(kbin));
+      }
+
       if (k_mc == 0.0 || sigma_poly == 0.0 || n_cb <= 1.0 + 1e-6 ||
           sig_cb <= 0.0 || alpha_cb <= 0.0) {
         res[i] = static_cast<float>(pt_scale);
@@ -167,6 +256,8 @@ public:
 private:
   const std::size_t hash_;
   std::size_t seed_;
+  double k_unc_shift_ = 0.0;
+  bool k_unc_syst_ = false;
 };
 
 } // namespace wrem

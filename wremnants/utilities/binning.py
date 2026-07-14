@@ -210,7 +210,14 @@ absYWgen_binning_corr = [
 # for the Z, based on reco binning, but including additional bins where reco binning is too coarse
 ptZgen_binning_corr = [*ptZ_binning[:-1], 54, 75, 100, 1300]
 absYZgen_binning_corr = [
-    *yll_20quantiles_binning[10:-1],
+    0,
+    0.25,
+    0.5,
+    0.75,
+    1.0,
+    1.25,
+    1.5,
+    1.75,
     2.0,
     2.25,
     2.5,

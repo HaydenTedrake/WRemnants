@@ -1,7 +1,7 @@
 import math
 import os
 
-from wremnants.utilities import common, parsing, samples
+from wremnants.utilities import binning, common, parsing, samples
 from wums import logging
 
 analysis_label = common.analysis_label(os.path.basename(__file__))
@@ -11,6 +11,20 @@ parser.add_argument(
     default="none",
     choices=["none", "rochester", "scarekit"],
     help="Muon momentum correction to apply",
+)
+parser.add_argument(
+    "--helicityXsecsFile",
+    type=str,
+    default=None,
+    help="5 TeV w_z_helicity_xsecs file (from scripts/rabbit/make_helicity_xsecs_file.py, "
+    "based on the nominal_gen_helicity_xsecs_scale hist that this histmaker always "
+    "fills for Z MC); enables the helicity-decomposed QCD scale systematic hist",
+)
+parser.add_argument(
+    "--oneMCfileEveryN",
+    type=int,
+    default=None,
+    help="Use 1 MC file every N, where N is given by this option. Mainly for tests",
 )
 # This is the 5 TeV low-PU analysis: default to the 5 TeV era (2017G)
 parser.set_defaults(era="2017G")
@@ -39,6 +53,22 @@ elif args.muonCorr == "scarekit":
     narf.clingutils.Load("libROOTDataFrame")
     narf.clingutils.Declare('#include "lowpu_muonscarekit.hpp"')
     scarekit_mc_helper = ROOT.wrem.MuonScarekitMCHelper(args.randomSeedForToys)
+    # resolution up/down: smearing factor k shifted by +-1 bootstrap std;
+    # identical per-event RNG seeding keeps the same smearing random number
+    scarekit_mc_helper_resolup = ROOT.wrem.MuonScarekitMCHelper(
+        args.randomSeedForToys, 1.0
+    )
+    scarekit_mc_helper_resoldn = ROOT.wrem.MuonScarekitMCHelper(
+        args.randomSeedForToys, -1.0
+    )
+    # resolution systematic (scarekit --syst 4 window-variation spread),
+    # same construction as the stat variation but reading the syst4 file
+    scarekit_mc_helper_resolsystup = ROOT.wrem.MuonScarekitMCHelper(
+        args.randomSeedForToys, 1.0, True
+    )
+    scarekit_mc_helper_resolsystdn = ROOT.wrem.MuonScarekitMCHelper(
+        args.randomSeedForToys, -1.0, True
+    )
 
 datasets = getDatasets(
     maxFiles=args.maxFiles,
@@ -46,6 +76,7 @@ datasets = getDatasets(
     excl=args.excludeProcs,
     base_path=args.dataPath,
     era=args.era,
+    oneMCfileEveryN=args.oneMCfileEveryN,
 )
 
 import pickle
@@ -57,9 +88,12 @@ theory_corr_base = f"{common.data_dir}/TheoryCorrections/5020GeV"
 
 
 def load_corr_hist_5020(filename, proc, histname):
-    """5020 GeV pickles use ZMUMU5020GEV keys and legacy hist names."""
+    """Handle both standard-format 5020 GeV pickles (proc key 'Z') and the
+    legacy ones from David (ZMUMU5020GEV keys and legacy hist names)."""
     with lz4.frame.open(filename) as f:
         corr = pickle.load(f)
+    if proc in corr and histname in corr[proc]:
+        return corr[proc][histname]
     key = histname.replace("scetlib_dyturbo_LatticeNP", "scetlib_dyturboLatticeNP")
     key = key.replace("_minnlo_ratio", "__minnlo_ratio")
     return corr["ZMUMU5020GEV"][key]
@@ -125,10 +159,6 @@ yll_10quantiles_binning = [-2.5, -1.5, -1.0, -0.5, -0.25, 0.0, 0.25, 0.5, 1.0, 1
 axis_yll = hist.axis.Variable(
     yll_10quantiles_binning, name="yll", underflow=True, overflow=True
 )
-absYll_binning = [0.0, 0.25, 0.5, 1.0, 1.5, 2.5]
-axis_absYll = hist.axis.Variable(
-    absYll_binning, name="absYll", underflow=False, overflow=True
-)
 axis_mu_pt = hist.axis.Regular(60, 25, 150, name="mu_pt")
 axis_mu_eta = hist.axis.Regular(48, -2.4, 2.4, name="mu_eta")
 axis_mu_phi = hist.axis.Regular(32, -math.pi, math.pi, circular=True, name="mu_phi")
@@ -146,9 +176,45 @@ axis_phiStarll = hist.axis.Regular(
 )
 axis_phill = hist.axis.Regular(50, -math.pi, math.pi, circular=True, name="phill")
 
-axis_prefire_tensor = hist.axis.Integer(
-    0, 2, name="prefire_variation", underflow=False, overflow=False
+# entries: 0/1 muon stat up/down, 2/3 muon syst up/down, 4/5 ECAL up/down
+
+# Gen-level axes for the helicity cross sections with muR/muF variations
+# (input to the helicity-decomposed QCD scale uncertainty). Filled before
+# any reco selection so the angular coefficients are acceptance-unbiased.
+# flow bins required: the correction helper looks up events by gen kinematics
+# and out-of-range values (gen mass tails) must land in flow bins, which the
+# helper initializes to a safe weight of 1
+axis_massVgen = hist.axis.Regular(
+    1, 60.0, 120.0, name="massVgen", underflow=True, overflow=True
 )
+axis_absYVgen = hist.axis.Variable(
+    [0.0, 0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5],
+    name="absYVgen",
+    underflow=False,
+    overflow=True,
+)
+axis_ptVgen = hist.axis.Variable(
+    dilepton_ptV_binning, name="ptVgen", underflow=False, overflow=True
+)
+axis_chargeVgen = hist.axis.Regular(
+    1, -1.0, 1.0, name="chargeVgen", underflow=False, overflow=False
+)
+# coarse gen-ptV axis on the reco qcdScaleByHelicity hist, for nuisances
+# decorrelated in ~10% ptV quantiles as in the 13 TeV setup
+axis_ptVgen_decorr = hist.axis.Variable(
+    dilepton_ptV_binning[::4], name="ptVgen", underflow=False, overflow=True
+)
+
+qcd_helicity_helper = None
+if args.helicityXsecsFile:
+    qcd_helicity_helper = theory_corrections.make_qcd_uncertainty_helper_by_helicity(
+        is_z=True,
+        filename=args.helicityXsecsFile,
+        rebin_ptVgen=False,
+        rebin_absYVgen=False,
+        rebin_massVgen=False,
+    )
+    logger.info(f"Loaded qcdScaleByHelicity helper from {args.helicityXsecsFile}")
 
 
 def build_graph(df, dataset):
@@ -164,6 +230,90 @@ def build_graph(df, dataset):
     weightsum = df.SumAndCount("weight")
 
     df = df.Define("isEvenEvent", f"event % 2 == 0")
+
+    # Gen-level helicity cross sections with muR/muF scale variations, on a
+    # branch of the graph before any reco selection (acceptance-unbiased
+    # angular coefficients); aggregated into the w_z_helicity_xsecs input by
+    # scripts/rabbit/make_helicity_xsecs_file.py
+    is_z_mc = not dataset.is_data and (
+        "Zmumu" in dataset.name or "Ztautau" in dataset.name
+    )
+    if is_z_mc:
+        df_gen = generator_level_definitions.define_prefsr_vars(df)
+        df_gen = df_gen.DefinePerSample("theory_weight_truncate", "10.0")
+        # only the raw tensor; systematics.define_scale_tensor also defines a
+        # *_wnom variant needing nominal_weight, which the gen branch lacks
+        df_gen = df_gen.Define(
+            "scaleWeights_tensor",
+            "wrem::makeScaleTensor(LHEScaleWeight, theory_weight_truncate);",
+        )
+        # apply the central SCETlib+DYTurbo correction to the gen weight, as
+        # in the 13 TeV w_z_gen_dists production
+        gen_weight_col = "weight"
+        main_corr = theory_corrs[0] if theory_corrs else None
+        if main_corr is not None and main_corr in corr_helpers.get(dataset.name, {}):
+            df_gen = theory_corrections.define_central_pdf_weight(
+                df_gen, dataset.name, "ct18z"
+            )
+            df_gen = df_gen.Define("nominal_weight_uncorr", "weight*central_pdf_weight")
+            df_gen = theory_corrections.define_theory_corr_weight_column(
+                df_gen, main_corr
+            )
+            df_gen = df_gen.Define(
+                f"gen_{main_corr}Weight_tensor",
+                corr_helpers[dataset.name][main_corr],
+                [
+                    "massVgen",
+                    "absYVgen",
+                    "ptVgen",
+                    "chargeVgen",
+                    f"{main_corr}_corr_weight",
+                ],
+            )
+            df_gen = df_gen.Define(
+                "gen_nominal_weight", f"gen_{main_corr}Weight_tensor[0]"
+            )
+            gen_weight_col = "gen_nominal_weight"
+        df_gen = df_gen.Define(
+            "helicity_xsecs_scale_tensor",
+            f"wrem::makeHelicityMomentScaleTensor(csSineCosThetaPhigen, scaleWeights_tensor, {gen_weight_col})",
+        )
+        hist_helicity_xsecs_scale = df_gen.HistoBoost(
+            "nominal_gen_helicity_xsecs_scale",
+            [axis_massVgen, axis_absYVgen, axis_ptVgen, axis_chargeVgen],
+            [
+                "massVgen",
+                "absYVgen",
+                "ptVgen",
+                "chargeVgen",
+                "helicity_xsecs_scale_tensor",
+            ],
+            tensor_axes=[binning.axis_helicity, *systematics.scale_tensor_axes],
+            storage=hist.storage.Double(),
+        )
+        results.append(hist_helicity_xsecs_scale)
+
+        # LHE-level (pre-shower) moments: the difference wrt the pre-FSR
+        # moments gives the pythia_shower_kt variation of the coefficients
+        df_gen = generator_level_definitions.define_lhe_vars(df_gen)
+        df_gen = df_gen.Define(
+            "helicity_xsecs_scale_lhe_tensor",
+            f"wrem::makeHelicityMomentScaleTensor(csSineCosThetaPhilhe, scaleWeights_tensor, {gen_weight_col})",
+        )
+        hist_helicity_xsecs_scale_lhe = df_gen.HistoBoost(
+            "nominal_gen_helicity_xsecs_scale_lhe",
+            [axis_massVgen, axis_absYVgen, axis_ptVgen, axis_chargeVgen],
+            [
+                "massVlhe",
+                "absYVlhe",
+                "ptVlhe",
+                "chargeVlhe",
+                "helicity_xsecs_scale_lhe_tensor",
+            ],
+            tensor_axes=[binning.axis_helicity, *systematics.scale_tensor_axes],
+            storage=hist.storage.Double(),
+        )
+        results.append(hist_helicity_xsecs_scale_lhe)
 
     # apply muon momentum corrections before selection
     if args.muonCorr == "rochester":
@@ -184,19 +334,53 @@ def build_graph(df, dataset):
                 "wrem::applyMuonScarekitData(Muon_pt, Muon_eta, Muon_phi, Muon_charge)",
             )
         else:
+            scarekit_mc_cols = [
+                "run",
+                "luminosityBlock",
+                "event",
+                "Muon_pt",
+                "Muon_eta",
+                "Muon_phi",
+                "Muon_charge",
+                "Muon_nTrackerLayers",
+            ]
+            df = df.Define("Muon_pt_corr", scarekit_mc_helper, scarekit_mc_cols)
+            # statistical (bootstrap) variations of the corrections, MC only:
+            # scale from the kappa/lambda stds (+ correlation), resolution
+            # from the k std with the same per-event smearing random number
             df = df.Define(
-                "Muon_pt_corr",
-                scarekit_mc_helper,
-                [
-                    "run",
-                    "luminosityBlock",
-                    "event",
-                    "Muon_pt",
-                    "Muon_eta",
-                    "Muon_phi",
-                    "Muon_charge",
-                    "Muon_nTrackerLayers",
-                ],
+                "Muon_pt_corr_scaleUp",
+                "wrem::varyMuonScarekitScaleMC(Muon_pt_corr, Muon_eta, Muon_phi, Muon_charge, 1.0)",
+            )
+            df = df.Define(
+                "Muon_pt_corr_scaleDown",
+                "wrem::varyMuonScarekitScaleMC(Muon_pt_corr, Muon_eta, Muon_phi, Muon_charge, -1.0)",
+            )
+            df = df.Define(
+                "Muon_pt_corr_resolUp", scarekit_mc_helper_resolup, scarekit_mc_cols
+            )
+            df = df.Define(
+                "Muon_pt_corr_resolDown", scarekit_mc_helper_resoldn, scarekit_mc_cols
+            )
+            # systematic variations: scale from the syst3 (mass-window)
+            # spread, resolution from the syst4 (fit-window) spread
+            df = df.Define(
+                "Muon_pt_corr_scaleSystUp",
+                "wrem::varyMuonScarekitScaleMC(Muon_pt_corr, Muon_eta, Muon_phi, Muon_charge, 1.0, true)",
+            )
+            df = df.Define(
+                "Muon_pt_corr_scaleSystDown",
+                "wrem::varyMuonScarekitScaleMC(Muon_pt_corr, Muon_eta, Muon_phi, Muon_charge, -1.0, true)",
+            )
+            df = df.Define(
+                "Muon_pt_corr_resolSystUp",
+                scarekit_mc_helper_resolsystup,
+                scarekit_mc_cols,
+            )
+            df = df.Define(
+                "Muon_pt_corr_resolSystDown",
+                scarekit_mc_helper_resolsystdn,
+                scarekit_mc_cols,
             )
     else:  # "none"
         df = df.Alias("Muon_pt_corr", "Muon_pt")
@@ -285,16 +469,19 @@ def build_graph(df, dataset):
     df = df.Define("cosThetaStarll", "csSineCosThetaPhill.costheta")
     df = df.Define("phiStarll", "csSineCosThetaPhill.phi()")
 
-    # prefiring
     if dataset.is_data:
         df = df.Define("nominal_weight", "1.0")
     else:
-        df = df.Define("exp_weight", "weight*L1PreFiringWeight_Nom")
+        df = df.Alias("exp_weight", "weight")
 
         df = generator_level_definitions.define_prefsr_vars(df)
-        df = df.DefinePerSample("central_pdf_weight", "1.0")
-        df = df.Alias("nominal_weight_uncorr", "exp_weight")
         df = df.DefinePerSample("theory_weight_truncate", "10.0")
+        # the theory-correction denominators are made with the CT18Z central
+        # weight applied (gen histmaker runs with --pdfs ct18z), so the reco
+        # nominal must carry it too or the pdfas/pdfvars templates pick up a
+        # common CT18Z/native shape tilt relative to the nominal
+        df = theory_corrections.define_central_pdf_weight(df, dataset.name, "ct18z")
+        df = df.Define("nominal_weight_uncorr", "exp_weight*central_pdf_weight")
         applied_theory_corrs = []
         for theory_corr_name in theory_corrs:
             if theory_corr_name not in corr_helpers.get(dataset.name, {}):
@@ -405,56 +592,97 @@ def build_graph(df, dataset):
     # DATA MINIMUM BIN CONTENT: 88.0 at bin (ptll index 35, yll index 3) → ptll ∈ [28, 30) GeV, yll ∈ [-0.5, -0.25)
 
     if not dataset.is_data:
-        df = df.Define(
-            "prefire_vector",
-            """
-        auto res = std::vector<double>{L1PreFiringWeight_Muon_StatUp/L1PreFiringWeight_Muon_Nom, L1PreFiringWeight_Muon_StatDn/L1PreFiringWeight_Muon_Nom};
-        res[0] = nominal_weight * res[0];
-        res[1] = nominal_weight * res[1];
-        return res;
-        """,
-        )
-
-        df = df.Define(
-            "prefire_vector_weight", "wrem::vec_to_tensor<2>(prefire_vector)"
-        )
-
-        hist_prefire_tensor = df.HistoBoost(
-            "nominal_prefiring",
-            [axis_ptll, axis_absYll, axis_cosThetaStarll],
-            ["ptll", "absYll", "cosThetaStarll", "prefire_vector_weight"],
-            tensor_axes=[axis_prefire_tensor],
-        )
-        results.append(hist_prefire_tensor)
-
-        hist_muleadeta_prefire = df.HistoBoost(
-            "muleadeta_prefiring",
-            [axis_mu_eta],
-            ["muleadeta", "prefire_vector_weight"],
-            tensor_axes=[axis_prefire_tensor],
-        )
-        results.append(hist_muleadeta_prefire)
-
-        hist_mutraileta_prefire = df.HistoBoost(
-            "mutraileta_prefiring",
-            [axis_mu_eta],
-            ["mutraileta", "prefire_vector_weight"],
-            tensor_axes=[axis_prefire_tensor],
-        )
-        results.append(hist_mutraileta_prefire)
-
         if applied_theory_corrs:
             systematics.add_theory_corr_hists(
                 results,
                 df,
-                [axis_ptll, axis_absYll, axis_cosThetaStarll],
-                ["ptll", "absYll", "cosThetaStarll"],
+                [axis_ptll, axis_yll],
+                ["ptll", "yll"],
                 corr_helpers[dataset.name],
                 theory_corrs,
                 modify_central_weight=True,
                 isW=False,
                 base_name="ptll",
             )
+
+        # Helicity-decomposed QCD scale variations (angular coefficients):
+        # per-helicity muR/muF envelope from the gen helicity xsecs file,
+        # with a coarse ptVgen axis for nuisances decorrelated in ptV
+        if qcd_helicity_helper is not None and is_z_mc:
+            systematics.add_qcdScaleByHelicityUnc_hist(
+                results,
+                df,
+                qcd_helicity_helper,
+                [axis_ptll, axis_yll, axis_ptVgen_decorr],
+                ["ptll", "yll", "ptVgen"],
+                base_name="ptll",
+            )
+
+        # Z boson mass (and width-decorrelated) variations from the MiNNLO
+        # Breit-Wigner reweighting weights (MEParamWeight): 21 points in
+        # +-100 MeV steps of 10 MeV plus the +-2.1 MeV PDG-uncertainty
+        # entries; the fit uses massShiftZ2p1MeVUp/Down as the mZ uncertainty
+        if is_z_mc:
+            df = systematics.define_mass_width_sin2theta_weights(df, dataset.name)
+            if df.HasColumn("massWeight_tensor_wnom"):
+                systematics.add_massweights_hist(
+                    results,
+                    df,
+                    [axis_ptll, axis_yll],
+                    ["ptll", "yll"],
+                    base_name="ptll",
+                    proc=dataset.name,
+                )
+            if df.HasColumn("widthWeight_tensor_wnom"):
+                systematics.add_widthweights_hist(
+                    results,
+                    df,
+                    [axis_ptll, axis_yll],
+                    ["ptll", "yll"],
+                    base_name="ptll",
+                    proc=dataset.name,
+                )
+            if df.HasColumn("sin2thetaWeight_tensor_wnom"):
+                systematics.add_sin2thetaweights_hist(
+                    results,
+                    df,
+                    [axis_ptll, axis_yll],
+                    ["ptll", "yll"],
+                    base_name="ptll",
+                    proc=dataset.name,
+                )
+
+        # muon momentum scale/resolution statistical variations (scarekit
+        # bootstrap): recompute the dimuon kinematics from the varied muon pT.
+        # Selection (incl. the mll window) stays the nominal one; the residual
+        # window-migration effect of these ~1e-4 pT shifts is negligible for
+        # the ptll-yll templates.
+        if args.muonCorr == "scarekit":
+            for var, hname in [
+                ("scaleUp", "ptll_muonScaleUp"),
+                ("scaleDown", "ptll_muonScaleDown"),
+                ("resolUp", "ptll_muonResUp"),
+                ("resolDown", "ptll_muonResDown"),
+                ("scaleSystUp", "ptll_muonScaleSystUp"),
+                ("scaleSystDown", "ptll_muonScaleSystDown"),
+                ("resolSystUp", "ptll_muonResSystUp"),
+                ("resolSystDown", "ptll_muonResSystDown"),
+            ]:
+                ptcol = f"Muon_pt_corr_{var}"
+                df = df.Define(
+                    f"dimu_p4_{var}",
+                    f"ROOT::Math::PtEtaPhiMVector({ptcol}[i0], Muon_eta[i0], Muon_phi[i0], {MU_MASS})"
+                    f" + ROOT::Math::PtEtaPhiMVector({ptcol}[i1], Muon_eta[i1], Muon_phi[i1], {MU_MASS})",
+                )
+                df = df.Define(f"ptll_{var}", f"dimu_p4_{var}.Pt()")
+                df = df.Define(f"yll_{var}", f"dimu_p4_{var}.Rapidity()")
+                results.append(
+                    df.HistoBoost(
+                        hname,
+                        [axis_ptll, axis_yll],
+                        [f"ptll_{var}", f"yll_{var}", "nominal_weight"],
+                    )
+                )
 
     results += [
         hist_mll,
