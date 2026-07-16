@@ -1082,7 +1082,7 @@ def make_helicity_smoothing_helpers(
                 )
             )
 
-        if "pdf" in corrs:
+        if len(pdfs) > 0 and "pdf" in corrs:
             helicity_smoothing_helpers_procs[proc]["pdf"] = (
                 make_pdfs_uncertainties_helper_by_helicity(
                     proc=proc,
@@ -1105,7 +1105,7 @@ def make_helicity_smoothing_helpers(
                     as_vars=as_vars,
                 )
             )
-        if "pdf_central" in corrs:
+        if len(pdfs) > 0 and "pdf_central" in corrs:
             helicity_smoothing_helpers_procs[proc]["pdf_central"] = (
                 make_uncertainty_helper_by_helicity(
                     proc=proc,
@@ -1349,7 +1349,7 @@ def make_uncertainty_helper_by_helicity(
     if filename_den is None:
         filename_den = filename
 
-    # load helicity cross sections from file #TODO: include DYJetsToMuMuMass10to50
+    # load helicity cross sections from file
     proc_map = {
         "Z": ("Zmumu",),
         "W": ("Wmunu",),
