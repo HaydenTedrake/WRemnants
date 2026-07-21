@@ -1,7 +1,7 @@
 import math
 import os
 
-from wremnants.utilities import binning, common, parsing, samples
+from wremnants.utilities import binning, common, parsing, samples, theory_utils
 from wums import logging
 
 analysis_label = common.analysis_label(os.path.basename(__file__))
@@ -25,6 +25,13 @@ parser.add_argument(
     type=int,
     default=None,
     help="Use 1 MC file every N, where N is given by this option. Mainly for tests",
+)
+parser.add_argument(
+    "--sameSign",
+    action="store_true",
+    help="Select same-sign dimuon pairs instead of opposite-sign: signal-free "
+    "control region for the one-off fakes validation (fakes are ~charge-"
+    "symmetric, so N_fakes(OS) ~ N(SS)). Combine with --postfix.",
 )
 # This is the 5 TeV low-PU analysis: default to the 5 TeV era (2017G)
 parser.set_defaults(era="2017G")
@@ -100,10 +107,41 @@ def load_corr_hist_5020(filename, proc, histname):
 
 
 theory_corrections.load_corr_hist = load_corr_hist_5020
+
+# The scetlib_np lambda_central metadata hook (histmaker_tools) resolves the
+# corr pkl in the top-level TheoryCorrections/ dir, where a 13 TeV file with
+# the SAME tag exists but a different central runcard (delta_lambda2 = 0.0 vs
+# our 0.125) - point it at the 5020GeV files instead.
+from wremnants.postprocessing.scetlib_np import (
+    lambda_central as scetlib_np_lambda_central,
+)
+
+
+def _correction_pkl_path_5020(tag, proc, data_dir=None):
+    return f"{theory_corr_base}/{tag}_Corr{proc}.pkl.lz4"
+
+
+scetlib_np_lambda_central._correction_pkl_path = _correction_pkl_path_5020
+
 corr_helpers = theory_corrections.load_corr_helpers(
     [d.name for d in datasets if d.name in samples.zprocs],
     theory_corrs,
     base_dir=theory_corr_base,
+)
+
+# EW/FSR corrections: the 13 TeV ratio files are borrowed as-is (agreed
+# Jul 15) - they are functions of the gen dilepton kinematics only, which
+# are sqrt(s)-independent to good approximation. Variations only, the
+# central prediction is not modified (same convention as 13 TeV).
+ew_theory_corrs = [
+    "powhegFOEW",
+    "pythiaew_ISR",
+    "horaceqedew_FSR",
+    "horacelophotosmecoffew_FSR",
+]
+ew_corr_helpers = theory_corrections.load_corr_helpers(
+    [d.name for d in datasets if d.name in samples.zprocs],
+    ew_theory_corrs,
 )
 
 # define histogram axes, see: https://hist.readthedocs.io/en/latest/index.html
@@ -158,6 +196,25 @@ axis_ptll = hist.axis.Variable(
 yll_10quantiles_binning = [-2.5, -1.5, -1.0, -0.5, -0.25, 0.0, 0.25, 0.5, 1.0, 1.5, 2.5]
 axis_yll = hist.axis.Variable(
     yll_10quantiles_binning, name="yll", underflow=True, overflow=True
+)
+
+# Gen axes for the SCETlib-NP param-model response matrix (PR #701).
+# ptVGen ends at 44 (the last reco edge below the wide 44-100 bin) with
+# overflow=True: load_R folds the true qT > 44 flow into a trailing (44, 100]
+# gen bin so the model can feed it from the btgrid.
+axis_ptVGen = hist.axis.Variable(
+    dilepton_ptV_binning[:-1], name="ptVGen", underflow=False, overflow=True
+)
+axis_absYVGen = hist.axis.Regular(
+    10, 0, 2.5, name="absYVGen", underflow=False, overflow=True
+)
+axis_acceptance = hist.axis.Boolean(name="acceptance")
+# only the UL(-1) entry: for a 2D ptll-yll fit load_R sums the helicity
+# partition right back out (R) or takes the UL bin (N_gen), so a single
+# angular-integrated bin filled with the plain weight is exact (Integer, not
+# IntCategory: narf's category-axis conversion rejects int categories)
+axis_helicitySig_ul = hist.axis.Integer(
+    -1, 0, name="helicitySig", underflow=False, overflow=False
 )
 axis_mu_pt = hist.axis.Regular(60, 25, 150, name="mu_pt")
 axis_mu_eta = hist.axis.Regular(48, -2.4, 2.4, name="mu_eta")
@@ -315,6 +372,28 @@ def build_graph(df, dataset):
         )
         results.append(hist_helicity_xsecs_scale_lhe)
 
+        # SCETlib-NP param-model gen-total N_gen (PR #701): normalizes the
+        # response, P(b|g) = R/N_gen. N_gen must be INCLUSIVE in muon
+        # acceptance: R is loaded acceptance=True (gen-fiducial), so with an
+        # inclusive N_gen the ratio P = R/N_gen = acceptance x efficiency x
+        # migration, and the model's INCLUSIVE sigma_gen(lambda_c) folds to the
+        # fiducial reco spectrum (closes vs the card). Applying the muon
+        # pt/|eta| fiducial cuts here divides acceptance OUT of P, leaving the
+        # inclusive sigma_gen mismatched to a fiducial baseline -> the
+        # check_agreement guard trips (forward-|y| shape blow-up). Only the mass
+        # window stays (matching the model Q_lo=76 / Q_hi=106). Pre-FSR,
+        # SCETlib-corrected gen weight, booked before any reco selection.
+        if "Zmumu" in dataset.name:
+            df_gen_ngen = df_gen.Filter("massVgen > 76 && massVgen < 106")
+            df_gen_ngen = df_gen_ngen.Define("helicitySigUL", "int(-1)")
+            results.append(
+                df_gen_ngen.HistoBoost(
+                    "prefsr",
+                    [axis_ptVGen, axis_absYVGen, axis_helicitySig_ul],
+                    ["ptVgen", "absYVgen", "helicitySigUL", gen_weight_col],
+                )
+            )
+
     # apply muon momentum corrections before selection
     if args.muonCorr == "rochester":
         if dataset.is_data:
@@ -404,9 +483,12 @@ def build_graph(df, dataset):
     # ---- Filter out events with extra electrons ----
     df = df.Filter("nElectron == 0", "No electrons in the event")
 
-    # Opposite sign
+    # Opposite sign (or same sign for the fakes control region)
     df = df.Define("i0", "int(goodMu_idx[0])").Define("i1", "int(goodMu_idx[1])")
-    df = df.Filter("Muon_charge[i0] * Muon_charge[i1] < 0", "Opposite-sign muons")
+    if args.sameSign:
+        df = df.Filter("Muon_charge[i0] * Muon_charge[i1] > 0", "Same-sign muons")
+    else:
+        df = df.Filter("Muon_charge[i0] * Muon_charge[i1] < 0", "Opposite-sign muons")
 
     # ---- Build dimuon kinematics ----
     MU_MASS = 0.105658
@@ -509,6 +591,25 @@ def build_graph(df, dataset):
         else:
             df = df.Alias("nominal_weight", "exp_weight")
 
+        applied_ew_corrs = []
+        for ew_corr_name in ew_theory_corrs:
+            helper = ew_corr_helpers.get(dataset.name, {}).get(ew_corr_name)
+            if helper is None:
+                continue
+            if ew_corr_name == "powhegFOEW":
+                # corr hist axes are named massVlhe/absYVlhe/cosThetaStarlhe,
+                # but the lookup uses the pre-FSR variables (as at 13 TeV)
+                ew_cols = ["massVgen", "absYVgen", "csCosThetagen", "chargeVgen"]
+            else:
+                df = generator_level_definitions.define_ew_vars(df)
+                ew_cols = [*helper.hist.axes.name[:-2], "chargeVgen"]
+            df = df.Define(
+                f"{ew_corr_name}Weight_tensor",
+                helper,
+                [*ew_cols, "nominal_weight"],
+            )
+            applied_ew_corrs.append(ew_corr_name)
+
     # ---- Fill histograms ----
     hist_nLepton = df.HistoBoost(
         "nLepton", [axis_nLepton], ["nLepton", "nominal_weight"]
@@ -588,6 +689,42 @@ def build_graph(df, dataset):
     hist_ptll_vs_yll = df.HistoBoost(
         "ptll_vs_yll", [axis_ptll, axis_yll], ["ptll", "yll", "nominal_weight"]
     )
+
+    # SCETlib-NP param-model response R (PR #701): reco x gen joint yield on
+    # the fully selected reco events. Same reco axes as the fit hist;
+    # acceptance = the event falls in the gen-fiducial region N_gen is filled
+    # on (load_R slices acceptance=True, so reco-passing events outside the
+    # gen fiducial are excluded from the fold, as in the 13 TeV setup).
+    if not dataset.is_data and "Zmumu" in dataset.name:
+        df = df.Define(
+            "prefsr_acceptance",
+            "genl.pt() > 18 && genlanti.pt() > 18 && "
+            "std::fabs(genl.eta()) < 2.4 && std::fabs(genlanti.eta()) < 2.4 && "
+            "massVgen > 76 && massVgen < 106",
+        )
+        df = df.Define("helicitySigUL", "int(-1)")
+        results.append(
+            df.HistoBoost(
+                "nominal_prefsr_yieldsUnfolding",
+                [
+                    axis_ptll,
+                    axis_yll,
+                    axis_ptVGen,
+                    axis_absYVGen,
+                    axis_acceptance,
+                    axis_helicitySig_ul,
+                ],
+                [
+                    "ptll",
+                    "yll",
+                    "ptVgen",
+                    "absYVgen",
+                    "prefsr_acceptance",
+                    "helicitySigUL",
+                    "nominal_weight",
+                ],
+            )
+        )
     # MINIMUM BIN CONTENT: 95.79483724339086 at bin (ptll index 35, yll index 6) → ptll ∈ [28, 30) GeV, yll ∈ [0.25, 0.5)
     # DATA MINIMUM BIN CONTENT: 88.0 at bin (ptll index 35, yll index 3) → ptll ∈ [28, 30) GeV, yll ∈ [-0.5, -0.25)
 
@@ -601,6 +738,20 @@ def build_graph(df, dataset):
                 corr_helpers[dataset.name],
                 theory_corrs,
                 modify_central_weight=True,
+                isW=False,
+                base_name="ptll",
+            )
+
+        if applied_ew_corrs:
+            # EW/FSR variation templates from the borrowed 13 TeV ratio files
+            systematics.add_theory_corr_hists(
+                results,
+                df,
+                [axis_ptll, axis_yll],
+                ["ptll", "yll"],
+                ew_corr_helpers[dataset.name],
+                applied_ew_corrs,
+                modify_central_weight=False,
                 isW=False,
                 base_name="ptll",
             )
@@ -650,6 +801,40 @@ def build_graph(df, dataset):
                     ["ptll", "yll"],
                     base_name="ptll",
                     proc=dataset.name,
+                )
+
+        # b,c quark mass variations (MSHT20nnlo mbrange/mcrange members from
+        # LHEPdfWeightAltSet12; same menu as the 13 TeV PDFExt samples: 65
+        # central + 7 alpha_s + 9 mcrange @72 + 7 mbrange @81 = 88 entries,
+        # verified identical layout - the branch title claims MMHT2014 but is
+        # a known gridpack mislabel at both energies). Each member is divided
+        # by the range set's own central (member 0), so only the pure mass
+        # variation is applied on top of the CT18Z-corrected nominal - the
+        # 13 TeV from-MiNNLO scheme (pdfs msht20mb(c)range_renorm, see
+        # theory_corrections.define_pdf_columns renorm branch).
+        if is_z_mc:
+            for pdf_key in ("msht20mbrange_renorm", "msht20mcrange_renorm"):
+                pdf_info = theory_utils.pdfMap[pdf_key]
+                n_entries = pdf_info["entries"]
+                pdf_tensor = f"{pdf_info['name']}Weights_tensor"
+                df = df.Define(
+                    pdf_tensor,
+                    f"auto res = wrem::vec_to_tensor_t<double, {n_entries}>("
+                    f"{pdf_info['branch']}, {pdf_info['first_entry']}); "
+                    "res = res / res(0); "
+                    "res = wrem::clip_tensor(res, theory_weight_truncate); "
+                    "res = res * nominal_weight; return res;",
+                )
+                axis_pdfVar = hist.axis.StrCategory(
+                    [f"pdf{i}" for i in range(n_entries)], name="pdfVar"
+                )
+                results.append(
+                    df.HistoBoost(
+                        f"ptll_{pdf_info['name']}",
+                        [axis_ptll, axis_yll],
+                        ["ptll", "yll", pdf_tensor],
+                        tensor_axes=[axis_pdfVar],
+                    )
                 )
 
         # muon momentum scale/resolution statistical variations (scarekit
