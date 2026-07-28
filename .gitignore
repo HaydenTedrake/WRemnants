@@ -159,6 +159,3 @@ cython_debug/
 *.png
 *.hdf5
 *.root
-# editor/OS junk and local safety backups
-*.bak
-.DS_Store
