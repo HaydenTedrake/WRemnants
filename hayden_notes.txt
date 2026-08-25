@@ -33,7 +33,7 @@ python scripts/plotting/makeDataMCStackPlot.py $IN -o $OUT -f $TAG -n ptll --his
 
 ## Rabbit
 
-python scripts/rabbit/new_make_tensor.py \
+python scripts/rabbit/setupRabbit_5TeV.py \
     mz_5TeV_scetlib_dyturbo_LatticeNP_CT18Z_N3p0LL_N2LO_Corr.hdf5 \
     -o /tmp/rabbit_test/ --outname my_tensor \
     --histName ptll_vs_yll
@@ -117,3 +117,433 @@ python scripts/rabbit/make_helicity_xsecs_file.py \
 
 
 â¯ oki have some questions, please address all of them CAREFULLY: 1. why are 13tev non pert global impacts nonzero if it is supposedly using the same model. 2. why do i currently have no muon resolution impact. 3. did you have to add in teh muonscale group or was it already there? explain why it wasnt included before. 4. what is this Ã¢ SCETlib scetlibNPgammaNu/Feff      Ã¢ not rows   Ã¢ 0.000  Ã¢ Ã¢      Ã¢ same                    Ã¢ (is it the same as b,c quark masses etc). 5. is this with low-lumi 13TeV? did you make a comparison plot like before. 6. i thougyht that the reason we added b,c quark masses, etc in teh first place was bc we saw it in the 13TeV analysiscc
+
+### High-lumi 5 TeV projection (scale MC to a different luminosity)
+
+Goal: take the nominal 5 TeV dataset and ask "what would the alpha_s impacts look
+like with more luminosity?", then compare impact plots. Everything is blinded
+Asimov (-t -1); no data is ever fit.
+
+IMPORTANT: the nominal lumi is 300.291 pb^-1 (this is what the histmaker's data
+metadata reports and what normalizes all the MC), NOT 322. So to land at 805 pb^-1
+the scale factor is 805/300.291 = 2.680733. Check the tensor log line
+"--lumiScale ...: 300.291/pb -> 805.000/pb" to confirm.
+
+The luminosity UNCERTAINTY does not change and must not be touched: it is a
+relative lnN nuisance (Datagroups.lumi_uncertainties["2017G"] = 1.9%), independent
+of the absolute lumi used for normalization.
+
+--- Step 1: tensor with scaled lumi -------------------------------------------
+(new --lumiScale flag on the existing script; branch setuprabbit_5tev)
+
+  cd $WREM_BASE && source setup.sh
+  python scripts/rabbit/setupRabbit_5TeV.py \
+      mz_5TeV_scetlib_dyturbo_LatticeNP_CT18Z_N3p0LL_N2LO_Corr.hdf5 \
+      -o <outdir>/ --outname tensor_5tev_805pb --histName ptll_vs_yll \
+      --scetlibNPParamModel --lumiScale 2.680733
+
+  Optional: --lumiScaleVarianceLinearly also shrinks the MC-stat (binByBinStat)
+  uncertainty by sqrt(factor), i.e. "there really are proportionally more MC
+  events". Default (quadratic) keeps the RELATIVE MC-stat uncertainty fixed =
+  the same MC sample simply reweighted. binByBinStat is ~0.08 vs a ~3.0 total,
+  so this choice barely matters here.
+
+--- Step 2: fit (Luca's recipe, pass 1) ---------------------------------------
+NOTE -f '-t -1'. Luca's script DEFAULTS TO -t 0, which fits REAL DATA. Always
+override for 5 TeV.
+
+  python /work/submit/hayden17/apples_jul23/fitterSCETlibNP.py \
+      <outdir>/tensor_5tev_805pb.hdf5 -d <outdir>/5tev_805pb \
+      -m np_model_nu_fit=tanh_6 np_model_fit=tanh_6 \
+         xparam_default=lambda6_nu=0.01,lambda6=0.01 \
+         btgrid_dir=/work/submit/hayden17/scetlib_np/Z_COM5p020_CT18Z_N3p0LL_btgrid_fineall \
+         signal_proc=Zmumu_2017G Q_lo=76 Q_hi=106 \
+         nonsingular_fo_sing='<COM5 nnlo_sing pkl>' \
+         nonsingular_dyturbo='<COM5 dyturbo {scale} txt>' \
+      --freeze lambda_inf lambda_inf_nu lambda6 lambda6_nu \
+      --wall --wallStrength 5 -f '-t -1' --steps fit
+
+  The COM5 -m tokens (btgrid_dir, signal_proc, Q_lo/Q_hi, both nonsingular paths)
+  are REQUIRED. Without them the param model silently falls back to its COM13
+  defaults = 13 TeV theory on a 5 TeV card, and reco agreement blows up from
+  ~1.1% to ~16%. Always check the "reco agreement" line in the log.
+
+--- Step 3: traditional impacts (pass 2) --------------------------------------
+Do NOT use --steps hessian directly: Luca's hessian step appends
+--computeHistImpacts --saveHists --saveHistsPerProcess --computeVariations
+--computeHistErrors, and --computeHistImpacts re-differentiates the yields
+through the param model -> OOM at tanh_6. Use the stripped wrapper:
+
+  sbatch --mem=480G --cpus-per-task=4 --wrap "... hess_strip.sh <tensor> <fitdir> <COM5 -m tokens>"
+  (see /work/submit/hayden17/highlumi_jul27/jobB_hessian.sh for a working example)
+
+  hess_strip.sh regenerates Luca's hessian command from his own --dryRun, strips
+  the hist-saving flags, keeps --doImpacts, and writes to <fitdir>/cov_trad.
+
+  MEMORY: 480G is the PROVEN size. Measured peaks: 322 GB (13 TeV), 340 GB
+  (5 TeV). 384G OOM'd, 256G OOM'd. sacct MaxRSS UNDER-reports (it samples and
+  misses the Hessian spike) - do not size from it.
+
+  QUEUE GOTCHA: the cluster has MaxMemPerCPU=2048, so --mem=480G is silently
+  ALSO a request for 240 CPUs (480*1024/2048). That, not memory, is usually what
+  makes the job wait. Check with: scontrol show job <id> | grep NumCPUs.
+  Only submit80 (1.5 TB) and submit81-1 (500 GB) can host these.
+
+--- Step 4: comparison plot ---------------------------------------------------
+  python /work/submit/hayden17/overlay_trad_jul27.py
+  (edit F5/F13 at the top to point at the two cov_trad/fitresults.hdf5 to compare)
+
+  Uses TRADITIONAL impacts (impacts_grouped), NOT global. With the SCETlib-NP
+  param model the lambdas are free-floating, so their GLOBAL impact is 0 by
+  construction and the whole nonperturbative uncertainty gets reclassified into
+  `stat` (measured: resumNonpert global 0.000 vs traditional 2.82).
+
+  Row set/labels come from grouping["alphaS"] + impact_labels in
+  wremnants/utilities/styles/styles.py - the authoritative definition. The
+  an_rows list in overlay_an13_jul22.py is an incomplete hand-transcription.
+  PDF row: 13 TeV uses pdfCT18ZNoAlphaS; the 5 TeV card has no NoAlphaS variant,
+  its pdfCT18Z already excludes alpha_s, so map 5 TeV pdfCT18Z -> that row.d
+
+### DONE (Aug 6): 5 TeV now fits ptll < 44, matching 13 TeV
+
+Was: 5 TeV had 40 ptll bins (0 ... 37 44 100), 13 TeV 39 (0 ... 37 44). Edges
+IDENTICAL through 44; 5 TeV carried one extra wide 44-100 bin holding 5.62% of
+events, so the 5-vs-13 impact comparison was NOT over the same phase space.
+
+--- how to cut it -------------------------------------------------------------
+  setupRabbit_5TeV.py --ptllMax 44
+
+Crops the ptll axis when the tensor is built. _crop_ptll() runs inside
+_scale_mc() and the un-scaled branch of _get_hist(), so EVERY histogram gets it
+(nominal, all theory + experimental variations, and Asimov data, which is built
+from the already-cropped MC). A missed call site would fail loudly on a shape
+mismatch in tensorwriter, not silently misalign.
+
+Do NOT edit dilepton_ptV_binning: axis_ptVGen (mz_5TeV.py:206) already does
+[:-1] and would become [:-2]. Only axis_ptll would need changing, and that
+alters the response-matrix construction (response_matrix.py:226 appends the
+(44,100] gen overflow edge) -- untested, and it costs a full histmaker rerun.
+
+The response matrix needs NO change: R stays (40,10,40,10) and param_model.py
+:605 _crop_R_to_fit crops it, exactly the case its comment describes ("R has
+ptll [0, ..., 44, 100] while the fit ends at 44"). Verified: the fit ran clean,
+edmval 6.0e-29, no shape error.
+
+EQUIVALENT to the 13 TeV construction, not just similar. They end the axis at
+44 with overflow=True and flow=False, so events >44 land in an ignored
+overflow; we drop the bin. Same 39 bins, same edges, same events fitted.
+Advantage of the crop: the histmaker output KEEPS the 44-100 bin, so the cut is
+a one-flag A/B switch instead of a reprocessing.
+
+--- what it cost (alpha_s x10^-3) ---------------------------------------------
+                          ptll<100   ptll<44    delta
+  Total                     2.9900    3.0449   +0.055   <-- +1.8%
+  Non pert.                 2.7562    2.8146   +0.058
+  Matching + FO scale       1.6370    1.6207   -0.016
+  PDF                       1.5343    1.5068   -0.028
+  Luminosity                1.3534    1.4090   +0.056
+  Theory (EW)               0.6244    0.6551   +0.031
+  Data stat.                0.5154    0.5457   +0.030
+
+Nothing moves by more than 0.06. The 44-100 bin held 5.6% of events but almost
+no alpha_s information -- consistent with the prefit plots, where the alpha_s
+variation is flat above ~20 GeV. `stat` rises 5.9% (vs 2.9% for pure sqrt(N)
+counting) and `luminosity` 4.1%, i.e. the high-pt tail was helping separate a
+rate shift from an alpha_s shift.
+
+Matched-lumi comparison is now genuinely like-for-like: 3.04 vs 3.93, still
+~23% better at 5 TeV.
+
+--- files ---------------------------------------------------------------------
+  /work/submit/hayden17/ptll44/tensor_ptll44.hdf5            39 bins, 85,219 evt
+  /work/submit/hayden17/ptll44/5tev_ptll44/fitresults.hdf5   pass-1 fit
+  /work/submit/hayden17/ptll44/5tev_ptll44/cov_trad/...      traditional impacts
+  plots: https://submit.mit.edu/~hayden17/aug10/
+
+STILL OPEN for Luca: is 44 GeV his cutoff for a resummation-validity reason, or
+inherited binning? We now match him either way, but the reason decides whether
+the cut is physics or convention.
+
+### Plotting fit templates: rabbit_plot_hists.py (what actually gets fitted)
+
+Luca's preferred way to look at a variation:
+
+  rabbit_plot_hists.py <fitresults.hdf5> --prefit --varNames pdfAlphaS
+
+This plots the DATACARD templates the fit actually sees (after symmetrization,
+after the ptll x yll -> ptll projection, after the tensor's bookkeeping).
+makeDataMCStackPlot.py instead plots the raw HISTMAKER histograms. They should
+agree, but only rabbit_plot_hists is guaranteed to be what is fitted.
+
+The difference matters most for b,c quark masses: the histmaker stores 16 raw
+MSHT20 PDF members (mbrange 7, mcrange 9), while the fit only ever sees 4
+symmetrized nuisances -- pdfMSHT20{mb,mc}range{SymAvg,SymDiff}. Comparing raw
+members is NOT the same as comparing what the fit uses.
+
+--- GOTCHA: the fitresult must contain saved histograms ---------------------
+rabbit_plot_hists.py takes a rabbit FITRESULT (not a datacard), and it needs
+histograms saved in it. Our production fits do NOT have them, because
+--saveHists and friends were deliberately stripped to avoid the hessian-step
+OOM. Symptom: nothing to plot.
+
+Luca's reference DOES have them -- verified directly:
+  /ceph/.../lavezzo/alphaS/260717_2D_wallmargin_0/cov/fitresults.hdf5
+  mappings["Project ch0 ptll"]["channels"]["ch0"] contains
+  hist_prefit_inclusive_variations (and the postfit/global_impacts ones).
+(One of his 260717 hessian logs ends "Command failed (exit -9)", but that was
+a failed attempt, not his final run -- do not conclude from a log alone that
+a step is impossible; open the output file and list its keys.)
+
+Regenerate a fitresult WITH hists, reusing an already-converged postfit
+(so this is only the hist-saving pass, no refit):
+
+  rabbit_fit.py <card> \
+    --paramModel wremnants.postprocessing.scetlib_np.SCETlibNPParamModel \
+      np_model_nu_fit=tanh_6 np_model_fit=tanh_6 \
+      xparam_default=lambda6_nu=0.01,lambda6=0.01 \
+      <COM5 tokens for 5 TeV: btgrid_dir=, signal_proc=Zmumu_2017G, \
+       Q_lo=76 Q_hi=106, nonsingular_fo_sing=, nonsingular_dyturbo=> \
+      hessian_straightthrough=1 hessian_gn=1 \
+    --freezeParameters lambda_inf lambda_inf_nu lambda6 lambda6_nu \
+    -r ...NPDampingWall ...NPDampingMapping smallb=1 margin=0 \
+    --regularizationStrength 5.0 --minimizerMaxiter 1000 -t -1 \
+    --noFit --externalPostfit <the converged pass-1 fitresults.hdf5> \
+    --prefitOnly --saveHists --computeVariations --computeHistErrors \
+    -m Project ch0 ptll \
+    -o <outdir>
+
+  KEEP    : --saveHists --computeVariations --computeHistErrors
+            --computeVariations   -> hist_prefit_inclusive_variations,
+                                     which is exactly what --varNames reads.
+            --computeHistErrors   -> without it rabbit_plot_hists.py:430 raises
+                                     "Did not find uncertainties in prefit hist"
+                                     (the gate is unconditional; there is no
+                                     flag to plot without the band).
+  KEEP    : --prefitOnly (rabbit_fit.py:107, gate at :965) for a --prefit plot.
+            It stops after save_hists(prefit=True), skipping fit() and the
+            postfit save_hists -- the expensive half. Only do the full run if
+            you also want --postfit plots.
+  KEEP    : -m Project ch0 ptll   (the fit is 2D; this gives the ptll projection)
+            WITHOUT it rabbit_plot_hists.py exits SILENTLY (exit 0, no output,
+            no error): it loops `for margs in args.mapping:` over an empty list.
+  DO NOT  : --computeHistImpacts  <-- THIS is the OOM. It maps to
+            compute_global_impacts on OBSERVABLES (rabbit_fit.py:368 ->
+            global_impacts_obs), which re-differentiates the yields through the
+            SCETlib-NP param model. Same path that makes --globalImpacts
+            impossible at tanh_6.
+  DO NOT  : --saveHistsPerProcess (not needed, adds memory)
+
+  MEMORY -- measured, do not guess:
+    120G / 180G          OOM
+    300G                 OOM *with* --computeHistErrors (both energies)
+    300G                 works WITHOUT --computeHistErrors, but only barely:
+                         MaxRSS 309 GB against a 322 GB ceiling (4% margin)
+    400G                 what you want for the full prefit plot recipe
+    480G                 works for the full (non-prefitOnly) run
+    Why: --computeHistErrors is a SEPARATE expected_events() call
+    (rabbit_fit.py:362, compute_variance=) on top of the --computeVariations
+    call (:498). There is no flag to restrict variations to the few nuisances
+    you actually want to plot -- it is all ~282 params or nothing. So the
+    memory is irreducible; the only lever is the allocation.
+    Only submit80 (1540 GB) and submit81 (500 GB) can host >=400G at all.
+    On submit, MaxMemPerCPU=2048MB, so --mem=300G silently allocates 150 CPUs.
+    Do not over-ask: 480G = 240 CPUs (7.5 h queue), 700G = 350 CPUs (23 h queue
+    and it reserved 91% of submit80, blocking 76 other jobs). 300G is the
+    smallest that works -- use it.
+    NB: MaxRSS is meaningless for an OOM-KILLED job; it just reports the cgroup
+    ceiling. Do not read a big MaxRSS on a failed job as "it needed that much".
+    NB: MaxRSS is also POLLED, so it undersamples short peaks. The 300G+errors
+    OOM reported MaxRSS 287 GB -- *below* the 309 GB of the run that SUCCEEDED.
+    A MaxRSS under the limit does not mean memory was not the cause.
+
+  Working driver: /work/submit/hayden17/savehists_jul30/run_savehists.sh
+                    usage: run_savehists.sh <5tev|13tev> <prefit|full|light>
+                  submit with sb_5tev_prefit300.sh / sb_13tev_prefit300.sh
+                  (one parameterized script, not a copy per energy/mode).
+                  13 TeV takes no COM5 tokens - it uses the COM13 defaults.
+
+  The script sources setup.sh ITSELF and cd's to WREM_BASE first. Do not call
+  `bash -c "source setup.sh && ..."` from elsewhere -- setup.sh is only findable
+  from the WRemnants directory, and it fails with NO output at all, which has
+  silently eaten several runs.
+
+--- then plot --------------------------------------------------------------
+  rabbit_plot_hists.py <outdir>/fitresults.hdf5 --prefit \
+     --varNames pdfAlphaS \
+     -o ~/public_html/ -p <postfix> --lumi 0.3 --rrange 0.95 1.05
+
+  b,c quark masses (note: the SYMMETRIZED nuisance names, not pdf1/pdf6):
+     --varNames pdfMSHT20mbrangeSymAvg pdfMSHT20mcrangeSymAvg
+     --rrange 0.99 1.01     <-- these variations are 0.1-0.6%; a +-5% range
+                                renders them invisible
+
+  X RANGE: use --axlim 0 44 (two values PER AXIS). NOT --xlim -- that option
+  exists in rabbit/rabbit/parsing.py but rabbit_plot_hists.py:461 reads
+  args.axlim, so --xlim is accepted and then silently ignored. Cap the 5 TeV
+  plots at 44 so they share a frame with 13 TeV; otherwise the wide 44-100 bin
+  stretches the axis to 100 and squashes the interesting 0-20 GeV region.
+  NB this only changes the VIEW -- the 44-100 bin is still in the 5 TeV fit.
+
+  ENERGY LABEL: rabbit_plot_hists.py has NO --com flag, so every 5 TeV plot
+  comes out stamped "(13 TeV)". Use the wrapper:
+     savehists_jul30/plot_com.py <com> <normal rabbit_plot_hists args...>
+  Setting hep.rcParams.label.com before runpy is NOT enough -- importing the
+  plotting stack applies the CMS style and resets it to 13 (symptom: the lumi
+  label updates but the energy does not). The wrapper instead patches
+  hep.label.exp_label, which wums.plot_tools.add_decor resolves by attribute at
+  call time. Do NOT also patch exp_text: it has no `com` kwarg and raises
+  "'LumiText' object has no property 'com'". Check the label on the output.
+
+  Use -p/--postfix to keep everything in ONE gallery rather than making a
+  separate output folder per energy. Luca asked for this explicitly:
+     -o ~/public_html/jul30 -p alphas_5tev
+     -o ~/public_html/jul30 -p alphas_13tev   (etc.)
+
+  Check the available variation names before plotting -- a wrong name is a
+  silent no-op:
+     h = fr["mappings"]["Project ch0 ptll"]["channels"]["ch0"] \
+           ["hist_prefit_inclusive_variations"].get()
+     np.array(h.axes["vars"]).astype(str)
+  The 5 TeV card has 282 of them, incl. pdfAlphaS, pdfMSHT20{mb,mc}range{SymAvg,
+  SymDiff}, and the free NP params lambda2/4/6(_nu), lambda_inf(_nu),
+  delta_lambda2.
+
+
+
+1. Source: NanoAOD branch LHEPdfWeightAltSet12 (MSHT20nnlo menu, 88 entries: 65 central + 7 α_s + 9 mcrange @72 + 7 mbrange @81). LHAPDF sets MSHT20nnlo_mbrange_nf5, MSHT20nnlo_mcrange_nf5. Defined in theory_utils.py:102-134 as msht20mbrange_renorm / msht20mcrange_renorm.
+2. What they are: dedicated MSHT20 releases with m_b (or m_c) changed and the PDF refitted — not PDF-error eigenvectors. Hence a separate bcQuarkMass group, not part of pdfCT18Z.
+3. Renormalisation (renorm: True), mz_5TeV.py:821: res = res / res(0) — every member divided by that range set's own central. Nominal is CT18Z, so this isolates the pure mass ratio inside MSHT20 instead of importing the CT18Z↔MSHT20 difference. Matches the 13 TeV from-MiNNLO scheme.
+4. Then: clip_tensor(res, theory_weight_truncate), res * nominal_weight → filled into ptll_pdfMSHT20mbrange / …mcrange, binned ptll×yll with a pdfVar axis.
+5. Reduction, setupRabbit_5TeV.py:975-999: only the extreme members, per the 13 TeV BC_QUARK_MASS_VARIATIONS convention — mbrange pdf1/pdf6, mcrange pdf1/pdf8 (member 0 = set central).
+6. Symmetrisation: symmetrize="quadratic", as for PDF uncertainties → each pair becomes SymAvg + SymDiff. 16 raw members → 4 nuisances, group bcQuarkMass (⊂ theory).
+7. No 90%→68% CL conversion — deliberate: the MSHT20 range sets are not 90% CL eigenvectors.
+8. Application: multiplicative reweight of the MiNNLO weight on top of the CT18Z-corrected nominal — not through SCETlib+DYTurbo (unlike pdfAlphaS and pdfCT18Z, which are).
+9. What's plotted: the 4 symmetrised nuisances the fit actually uses, not the 16 raw members.
+10. Result: m_c dominates (~6×) and is larger at 5 TeV — 0.935% vs 0.795%; m_b is genuinely smaller — 0.143% vs 0.267%. So "smaller at 5 TeV" holds for m_b only.
+11. Open, needs your input: the code comment claims parity with the 13 TeV add_quark_mass_vars, but I verified only the 5 TeV side — there's no mz_dilepton.py in my checkout. Relevant because your card has an extra mb_up nuisance mine doesn't, which is still the leading candidate for the impact gap (0.19 vs 0.66 ×10⁻³).so
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+################################################################################
+### RECIPE: reproduce the aug10 plots  https://submit.mit.edu/~hayden17/aug10/
+################################################################################
+
+Everything below assumes:
+  SIF=/cvmfs/unpacked.cern.ch/gitlab-registry.cern.ch/bendavid/cmswmassdocker/wmassdevrolling:latest
+  export APPTAINER_BIND="/tmp,/home/submit,/work/submit,/ceph/submit,/scratch/submit,/cvmfs,/etc/grid-security,/run"
+  singularity exec "$SIF" bash -c "source setup.sh && <cmd>"
+ALWAYS cd to WRemnants BEFORE sourcing setup.sh -- otherwise it fails with NO
+output at all and the command silently does nothing.
+
+--- INPUT FITRESULTS (already produced; skip to PLOTS if they still exist) -----
+  5T   =/work/submit/hayden17/ptll44/5tev_ptll44/cov_trad/fitresults.hdf5
+  L13  =/work/submit/hayden17/apples_jul23/13tev_0p3fb/cov_trad/fitresults.hdf5
+  F13  =/ceph/submit/data/group/cms/store/user/lavezzo/alphaS/260717_2D_wallmargin_0/cov/fitresults.hdf5
+  D    =/work/submit/hayden17/savehists_jul30      (prefit hists, per energy)
+
+===============================================================================
+A. REBUILD THE 5 TeV CHAIN  (only if the histmaker output changed)
+===============================================================================
+A1. tensor, ptll < 44 to match 13 TeV                       (~2 min, login node)
+  python scripts/rabbit/setupRabbit_5TeV.py \
+    /work/submit/hayden17/WRemnants/mz_5TeV_scetlib_dyturbo_LatticeNP_CT18Z_N3p0LL_N2LO_Corr.hdf5 \
+    -o /work/submit/hayden17/ptll44/ --outname tensor_ptll44 \
+    --histName ptll_vs_yll --scetlibNPParamModel --ptllMax 44
+  CHECK: 39 ptll bins x 10 yll, 85,219 events, 273 systs.
+
+A2. pass-1 fit                    (sbatch, 120G = 60 CPUs, ran in 4 min)
+  python /work/submit/hayden17/apples_jul23/fitterSCETlibNP.py \
+    /work/submit/hayden17/ptll44/tensor_ptll44.hdf5 -d /work/submit/hayden17/ptll44/5tev_ptll44 \
+    -m np_model_nu_fit=tanh_6 np_model_fit=tanh_6 xparam_default=lambda6_nu=0.01,lambda6=0.01 \
+       btgrid_dir=/work/submit/hayden17/scetlib_np/Z_COM5p020_CT18Z_N3p0LL_btgrid_fineall \
+       signal_proc=Zmumu_2017G Q_lo=76 Q_hi=106 \
+       nonsingular_fo_sing='<...com5p02..._nnlo_sing_combined.pkl>' \
+       nonsingular_dyturbo='<...nnlo-scetlibmatch-5.02TeV/...{scale}-scetlibmatch.txt>' \
+    --freeze lambda_inf lambda_inf_nu lambda6 lambda6_nu \
+    --wall --wallStrength 5 -f '-t -1' --steps fit
+  CHECK: edmval ~1e-29. Template: /work/submit/hayden17/ptll44/jobfit44.sh
+
+A3. traditional impacts        (sbatch, **480G** = 240 CPUs, 10 min + LONG queue)
+  bash /work/submit/hayden17/apples_jul23/hess_strip.sh \
+    /work/submit/hayden17/ptll44/tensor_ptll44.hdf5 /work/submit/hayden17/ptll44/5tev_ptll44 \
+    btgrid_dir=... signal_proc=Zmumu_2017G Q_lo=76 Q_hi=106 \
+    nonsingular_fo_sing='...' nonsingular_dyturbo='...'
+  480G IS REQUIRED: 300G OOMs (measured MaxRSS 399 GB). Template: ptll44/jobimp44.sh
+  Writes <fitdir>/cov_trad/fitresults.hdf5 (~720 KB; an 18 KB file = OOM stub).
+
+===============================================================================
+B. PREFIT TEMPLATE HISTS   (only needed for the prefit_* and overlay_* plots)
+===============================================================================
+  bash /work/submit/hayden17/savehists_jul30/run_savehists.sh <5tev|13tev|13tev_fulllumi> prefit
+  sbatch templates: savehists_jul30/sb_{5tev,13tev,13tev_fulllumi}_prefit400.sh
+  400G REQUIRED (MaxRSS ~320-327 GB; 300G OOMs). ~9 min each.
+  Needs --saveHists --computeVariations --computeHistErrors (all three; see the
+  gotchas section above). Output: $D/<tag>_prefit/fitresults.hdf5
+
+===============================================================================
+C. PLOTS  (all fast, login node; OUT=/home/submit/hayden17/public_html/aug10)
+===============================================================================
+C1. prefit alpha_s template, per energy
+  # plot_com.py sets the beam energy label; rabbit_plot_hists has no --com flag
+  python3 $D/plot_com.py 5.02 $D/5tev_prefit/fitresults.hdf5 --prefit \
+    -m Project ch0 ptll --varNames pdfAlphaS --varLabels 'AlphaS' \
+    --rrange 0.95 1.05 --lumi 0.3 --axlim 0 44 --noData \
+    --xlabel '$p_\mathrm{T}^{\mu\mu}$ (GeV)' -o $OUT -p alphas_5tev
+  # 13 TeV full lumi: swap 5.02->13, the fitresult, --lumi 16.8, -p alphas_13tev_fulllumi
+
+C2. prefit b,c quark mass templates
+  python3 $D/plot_com.py 5.02 $D/5tev_prefit/fitresults.hdf5 --prefit \
+    -m Project ch0 ptll \
+    --varNames pdfMSHT20mbrangeSymAvg pdfMSHT20mcrangeSymAvg \
+    --varLabels 'MSHT20 $m_b$ range' 'MSHT20 $m_c$ range' \
+    --rrange 0.99 1.01 --lumi 0.3 --axlim 0 44 --noData \
+    --xlabel '$p_\mathrm{T}^{\mu\mu}$ (GeV)' -o $OUT -p bcmass_5tev
+  # 13 TeV: swap 5.02->13 and the fitresult, -p bcmass_13tev
+
+C3. alpha_s overlays (5 vs 13 TeV, 2 panels)
+  P=/work/submit/hayden17/savehists_jul30/overlay_alphas_aug3.py
+  python3 $P                # Events/GeV, both at 0.3/fb  (lumi-matched)
+  python3 $P --density      # unit-area shape; lumi cancels exactly
+  python3 $P --full13       # 13 TeV at its real 16.8/fb
+  (edit OUT inside the script to point at aug10)
+
+C4. grouped impacts, 5 TeV alone
+  python3 rabbit/bin/rabbit_plot_pulls_and_impacts.py $5T \
+    -o $OUT --mode group --config scripts/rabbit/plot_config_5tev.py --grouping an13 \
+    --scaleImpacts 2.0 --impactTitle '<i>a</i><sub>S</sub> in 10<sup>-3</sup>' \
+    --showNumbers --oneSidedImpacts --otherExtensions png --postfix 5tev
+  NB omit --impactType => TRADITIONAL impacts. Global is unusable here: the NP
+  lambdas float, so resumNonpert global = 0.000 vs traditional 2.81.
+
+C5. grouped impact overlays, 5 vs 13 TeV
+  python3 /work/submit/hayden17/overlay_trad_jul27.py --main $5T --ref $L13 \
+    --mainName "5.02 TeV (0.3 fb<sup>-1</sup>)" --refName "13 TeV (0.3 fb<sup>-1</sup>)" \
+    -o $OUT/impacts_5tev_vs_13tev_lowlumi.html
+  # full lumi: --ref $F13 --refName "13 TeV (16.8 fb<sup>-1</sup>)" -o .../fulllumi.html
+
+C6. individual CT18Z PDF eigenvectors (breaks open the "PDF" row)
+  python3 /work/submit/hayden17/pdf_overlay_aug5.py --main $5T --ref $L13 \
+    --refName "13 TeV (0.3 fb<sup>-1</sup>)" -o $OUT/impacts_pdf_5tev_vs_13tev_lowlumi.html
+  # full lumi: --ref $F13 ... -o .../impacts_pdf_5tev_vs_13tev_fulllumi.html
+  Options: --parts SymAvg (29 rows instead of 58), --top N (largest only).
+  Name mapping is handled inside: 5 TeV pdf{2k-1}_pdf{2k} == 13 TeV pdf{k}CT18Z.
+
+--- CURRENT NUMBERS (alpha_s x10^-3, traditional, blinded Asimov) --------------
+  5 TeV  ptll<44 .......... 3.04     (was 2.99 with the 44-100 bin)
+  13 TeV 0.3/fb  2D ....... 3.93     -> 5 TeV 23% better at equal lumi
+  13 TeV 16.8/fb 2D ....... 1.00     (Luca's 260717; -t 0, i.e. DATA not Asimov)
+  PDF eigenvector quadrature: 5 TeV 1.32 | 13 TeV 2.52 (0.3/fb) / 0.67 (16.8/fb)
