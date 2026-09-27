@@ -114,11 +114,24 @@ def compute_nonsingular_gen(
         else dyturbo_path
     )
     hfo_sing = _central(input_tools.read_scetlib_hist(fo_sing_path, charge=charge))
-    hfo = input_tools.read_dyturbo_hist(
-        [dyturbo_path], axes=list(dyturbo_axes), charge=charge
-    )
+    try:
+        hfo = input_tools.read_dyturbo_hist(
+            [dyturbo_path], axes=list(dyturbo_axes), charge=charge
+        )
+    except ValueError:
+        # 5.02 TeV: the DYTurbo grids (results_z-2d-…) are Q-PRE-INTEGRATED
+        # (header: ylo yhi qTlo qThi), unlike the 3D (Q, Y, qT) 13 TeV ones.
+        # Read them as (Y, qT) and integrate the SCETlib singular over its
+        # full Q range below — the two runs were produced Q-matched for
+        # make_theory_corr, which subtracts these same files the same way.
+        hfo = input_tools.read_dyturbo_hist(
+            [dyturbo_path], axes=["Y", "qT"], charge=charge
+        )
     if "vars" in hfo.axes.name:
         hfo = _central(hfo)
+
+    if "Q" not in hfo.axes.name and "Q" in hfo_sing.axes.name:
+        hfo_sing = hfo_sing[{"Q": slice(0, len(hfo_sing.axes["Q"]), sum)}]
 
     # Align shared physics axes (DYTurbo is coarser), then σ_ns = DYTurbo − singular.
     for ax in ("Y", "Q", "qT"):
@@ -128,11 +141,12 @@ def compute_nonsingular_gen(
 
     if "charge" in nonsing_h.axes.name:
         nonsing_h = nonsing_h[{"charge": sum}]
-    # Q-window: slice(...,sum) sums ONLY the in-range Q bins (no underflow leak).
-    Qe = np.asarray(nonsing_h.axes["Q"].edges, dtype=np.float64)
-    qi = int(np.argmin(np.abs(Qe - q_lo)))
-    qj = int(np.argmin(np.abs(Qe - q_hi)))
-    nonsing_h = nonsing_h[{"Q": slice(qi, qj, sum)}]
+    if "Q" in nonsing_h.axes.name:
+        # Q-window: slice(...,sum) sums ONLY the in-range Q bins (no underflow leak).
+        Qe = np.asarray(nonsing_h.axes["Q"].edges, dtype=np.float64)
+        qi = int(np.argmin(np.abs(Qe - q_lo)))
+        qj = int(np.argmin(np.abs(Qe - q_hi)))
+        nonsing_h = nonsing_h[{"Q": slice(qi, qj, sum)}]
     nonsing_h = hh.makeAbsHist(nonsing_h, "Y")  # signed Y -> |Y|
 
     qT_c = np.asarray(nonsing_h.axes["qT"].centers, dtype=np.float64)
@@ -163,9 +177,20 @@ _FACTORIZED_CACHE_BASENAME = "combined_btgrid.factorized.npz"
 _FACTORIZED_SCHEMA_VERSION = "factorized_v1"
 # The arrays that fully populate the factorized layout (see _assign_factorized).
 _FACTORIZED_KEYS = (
-    "flat_idx", "Q_unique", "Y_unique", "qT_unique", "bT", "b_bar",
-    "Y_feff_unique", "bT_simpson_w", "I_pert_u", "C_nu_uu", "c_of_u",
-    "feff_idx_u", "gather_idx", "KwqT",
+    "flat_idx",
+    "Q_unique",
+    "Y_unique",
+    "qT_unique",
+    "bT",
+    "b_bar",
+    "Y_feff_unique",
+    "bT_simpson_w",
+    "I_pert_u",
+    "C_nu_uu",
+    "c_of_u",
+    "feff_idx_u",
+    "gather_idx",
+    "KwqT",
 )
 
 
@@ -393,7 +418,9 @@ class SigmaGenModel:
         # ---- Native (NY, NqT) Q-integrated reconstruction at λ_central, BEFORE
         # the |Y|-fold and qT-rebin — exposed so the native-binning validation
         # compares it to the SCETlib reference without the projection layer.
-        self.sigma_YqT_central = self.sigma_YqT_native(self.eff_central, self.gnu_central)
+        self.sigma_YqT_central = self.sigma_YqT_native(
+            self.eff_central, self.gnu_central
+        )
 
         # ---- Fixed-order/DYTurbo nonsingular term (NP-independent).
         # σ_gen^matched(λ) = σ_gen^resum(λ) + σ_ns, added at GEN level so it folds

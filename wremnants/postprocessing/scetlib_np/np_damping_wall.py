@@ -116,44 +116,65 @@ def _make_mapping_class():
     from rabbit.mappings.mapping import BaseMapping
 
     class NPDampingMapping(BaseMapping):
-        """Vestigial BaseMapping carrying the wall's option to the regularizer.
+        """Vestigial BaseMapping carrying the wall's options to the regularizer.
 
-        Only option (``key=value`` token, optional):
+        Options (``key=value`` tokens, optional):
             smallb=<0|1>   enforce the small-b turn-on walls λ2_ν≥0 and λ2_Y≥0
                            (default 1). smallb=0 drops them, keeping ONLY the
                            large-b limit/interior walls and the λ∞ floors — i.e.
                            constrain the limiting behaviour but let the leading
                            small-b coefficient float either sign.
+            margin=<float> signed damping cushion; each small-b turn-on coeff is
+                           enforced ≥ margin (default ``NP_DAMPING_MARGIN``).
+                           margin>0 is stricter than physical, margin=0 is bare
+                           positivity, margin<0 permits a controlled amount of
+                           anti-damping. Applied to ALL terms (small-b turn-on and
+                           interior discriminants alike); the frozen-λ6 large-b
+                           limit is physical by construction regardless.
 
         The model forms and λ order are derived from the registered
-        ``SCETlibNPParamModel`` (see module docstring). The binding |Y| (``Y_MAX``),
-        the λ∞ floor (``LAMBDA_INF_FLOOR``), and the damping cushion
-        (``NP_DAMPING_MARGIN``) are FIXED module constants, not CLI options — edit
-        them in this file to test, kept off the -r line on purpose.
+        ``SCETlibNPParamModel`` (see module docstring). The binding |Y| (``Y_MAX``)
+        and the λ∞ floor (``LAMBDA_INF_FLOOR``) are FIXED module constants, not CLI
+        options — edit them in this file to test, kept off the -r line on purpose.
         """
 
-        def __init__(self, indata, key, smallb=True):
+        def __init__(self, indata, key, smallb=True, margin=NP_DAMPING_MARGIN):
             super().__init__(indata, key)
             self.indata = indata
             self.smallb = bool(smallb)
+            self.margin = float(margin)
 
         @classmethod
         def parse_args(cls, indata, *args):
             smallb = True
+            margin = NP_DAMPING_MARGIN
             for a in args:
                 if "=" not in a:
                     raise ValueError(
-                        f"NPDampingMapping: arg must be 'smallb=<0|1>', got '{a}'"
+                        f"NPDampingMapping: arg must be 'key=value', got '{a}'"
                     )
                 k, v = a.split("=", 1)
                 if k == "smallb":
                     smallb = v.strip().lower() not in ("0", "false", "no", "off")
+                elif k == "margin":
+                    # signed damping cushion: coeff >= margin. margin>0 is stricter
+                    # than physical, margin=0 bare positivity, margin<0 allows a
+                    # controlled amount of anti-damping. Applied to all terms (small-b
+                    # turn-on and interior discriminants); the frozen-λ6 large-b limit
+                    # is physical by construction regardless.
+                    margin = float(v)
                 else:
                     raise ValueError(
-                        f"NPDampingMapping: unknown key '{k}'; only 'smallb' is "
-                        f"supported (ymax/eps/margin are fixed module constants)."
+                        f"NPDampingMapping: unknown key '{k}'; supported: "
+                        f"'smallb=<0|1>', 'margin=<float>' (ymax/eps are fixed "
+                        f"module constants)."
                     )
-            return cls(indata, f"{cls.__name__} smallb={int(smallb)}", smallb=smallb)
+            return cls(
+                indata,
+                f"{cls.__name__} smallb={int(smallb)} margin={margin:g}",
+                smallb=smallb,
+                margin=margin,
+            )
 
     return NPDampingMapping
 
@@ -172,11 +193,11 @@ def _make_regularizer_class():
             self.dtype = dtype
             self.mapping = mapping
             self.indata = mapping.indata
-            # ymax / eps / margin are fixed module constants (not CLI options);
-            # only smallb comes from the mapping.
+            # ymax / eps are fixed module constants (not CLI options); smallb and
+            # margin come from the mapping (margin default = NP_DAMPING_MARGIN).
             self.ymax = Y_MAX
             self.eps = LAMBDA_INF_FLOOR
-            self.margin = NP_DAMPING_MARGIN
+            self.margin = float(getattr(mapping, "margin", NP_DAMPING_MARGIN))
             self.enforce_small_b = bool(getattr(mapping, "smallb", True))
 
             # Forms + λ order are DERIVED from the SCETlibNPParamModel that
@@ -279,15 +300,25 @@ def _make_regularizer_class():
             pens = [relu2(eps - linfnu)]  # λ∞_ν > 0 (saturation-scale regime)
             if self._np_model_nu == "tanh_2":
                 pens.append(wall(l4nu))  # λ4_ν ≥ margin  (large-b leading)
+                if self.enforce_small_b:
+                    pens.append(wall(l2nu))  # λ2_ν ≥ margin  (small-b turn-on)
             else:  # tanh_6 — λ6_ν only exists in the tanh_6 vocabulary
                 l6nu = self._lam(params, "lambda6_nu")
                 pens.append(wall(l6nu))  # λ6_ν ≥ margin  (large-b leading)
-                # interior: λ4_ν ≥ 0 OR λ4_ν² ≤ 4·λ2_ν·λ6_ν. Self-gating — the
-                # relu2(-l4nu) vanishes for λ4_ν ≥ 0, so no penalty there; and no
-                # division by λ6_ν. (No margin on the interior discriminant.)
-                pens.append(relu2(relu2(-l4nu) - four * l2nu * l6nu))
-            if self.enforce_small_b:
-                pens.append(wall(l2nu))  # λ2_ν ≥ margin  (small-b turn-on)
+                if self.enforce_small_b:
+                    # small-b turn-on AND interior dip, unified: the minimum over u≥0
+                    # of the argument-per-u  P(u)/u = λ2_ν + λ4_ν·u + λ6_ν·u²  is
+                    #   minP = λ2_ν − relu(−λ4_ν)²/(4·λ6_ν)   (interior vertex if
+                    # λ4_ν<0, else the u=0 endpoint λ2_ν). This is in λ2_ν (coefficient)
+                    # units, so wall(minP) applies ONE natural-unit cushion to whichever
+                    # of turn-on/interior binds. At margin=0 ≡ the old (division-free)
+                    # small-b + discriminant pair (which was this × 4λ6_ν). C¹ in λ4_ν.
+                    minP = l2nu - relu2(-l4nu) / (four * l6nu)
+                    pens.append(wall(minP))
+                else:
+                    # smallb=0: leave the u=0 turn-on free (λ2_ν floats either sign);
+                    # keep only the interior-discriminant condition (scaled form + m).
+                    pens.append(relu2(relu2(-l4nu) - four * l2nu * l6nu + m))
 
             # ---- TMD-side F_eff damping: Q(u)=λ2_Y+B·u+λ6·u² ≥ 0 ∀u≥0, evaluated
             # at the binding |Y| extremes. cubic ≡ 3·λ∞²·B = 3·λ∞²·λ4 + λ2_Y³, so
@@ -302,18 +333,30 @@ def _make_regularizer_class():
             linf2 = linf * linf
             for y_sq in (0.0, self.ymax * self.ymax):
                 l2Y = l2 + dl2 * self._cast(y_sq)
-                if self.enforce_small_b:
-                    pens.append(wall(l2Y))  # λ2_Y ≥ margin  (small-b turn-on)
-                cubic = three * linf2 * l4 + l2Y**3  # 3·λ∞²·B
                 if self._np_model == "tanh_2":
+                    if self.enforce_small_b:
+                        pens.append(wall(l2Y))  # λ2_Y ≥ margin  (small-b turn-on)
+                    cubic = three * linf2 * l4 + l2Y**3  # 3·λ∞²·B
                     pens.append(wall(cubic))  # B ≥ margin  (large-b leading)
                 else:  # tanh_6
                     pens.append(wall(l6))  # λ6 ≥ margin  (large-b leading)
-                    # interior: B ≥ 0 OR B² ≤ 4·λ2_Y·λ6. In cubic-space (cubic =
-                    # 3·λ∞²·B): cubic ≥ 0 OR cubic² ≤ 36·λ∞⁴·λ2_Y·λ6. Self-gating,
-                    # division-free. (No margin on the interior discriminant.)
-                    bound = thirtysix * linf2 * linf2 * l2Y * l6
-                    pens.append(relu2(relu2(-cubic) - bound))
+                    if self.enforce_small_b:
+                        # small-b turn-on AND interior dip, unified: the minimum over
+                        # u≥0 of  Q(u) = λ2_Y + B·u + λ6·u²,  B = λ4 + λ2_Y³/(3λ∞²), is
+                        #   minQ = λ2_Y − relu(−B)²/(4·λ6)   (interior vertex if B<0,
+                        # else the u=0 endpoint λ2_Y). In λ2_Y (coefficient) units, so
+                        # wall(minQ) applies ONE natural-unit cushion to whichever of
+                        # turn-on/interior binds. At margin=0 ≡ the old small-b +
+                        # discriminant pair (which was this × 4λ6). C¹ in B.
+                        B = l4 + l2Y**3 / (three * linf2)
+                        minQ = l2Y - relu2(-B) / (four * l6)
+                        pens.append(wall(minQ))
+                    else:
+                        # smallb=0: leave the u=0 turn-on free (λ2_Y floats); keep only
+                        # the interior discriminant (scaled, division-free form + m).
+                        cubic = three * linf2 * l4 + l2Y**3
+                        bound = thirtysix * linf2 * linf2 * l2Y * l6
+                        pens.append(relu2(relu2(-cubic) - bound + m))
 
             return tf.add_n(pens)
 
