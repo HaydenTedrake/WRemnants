@@ -16,6 +16,7 @@ from wremnants.production import (
     generator_level_definitions,
     muon_calibration,
     muon_efficiencies_binned,
+    muon_efficiencies_cvh,
     muon_efficiencies_smooth,
     muon_prefiring,
     muon_selections,
@@ -628,6 +629,14 @@ def build_graph(df, dataset):
         df, cvh_helper, jpsi_helper, args, dataset, smearing_helper, bias_helper
     )
 
+    if args.cvhBadModules == "veto":
+        # CVH refit efficiency holes (badly aligned modules, incl. TIB-L2 detId
+        # 369141860): remove the affected (eta,phi') rectangles from data and MC
+        # alike, so the data-only refit inefficiency needs no correction.
+        df = muon_efficiencies_cvh.apply_bad_module_veto(
+            df, ptCut=args.vetoRecoPt, etaCut=args.vetoRecoEta
+        )
+
     df = muon_selections.select_veto_muons(
         df,
         nMuons=2,
@@ -883,6 +892,30 @@ def build_graph(df, dataset):
                     columnsForSF,
                 )
                 weight_expr += "*weight_fullMuonSF_withTrackingReco"
+
+            if args.cvhBadModules == "sf":
+                # alternative to the geometric veto applied above: downweight MC
+                # in the affected (eta,phi') cells by the measured data/MC
+                # efficiency ratio. See muon_efficiencies_cvh.hpp; charge/pt undo
+                # the track bending.
+                df, _ = muon_efficiencies_cvh.define_cvh_weight(
+                    df,
+                    [
+                        (
+                            "nonTrigMuons_eta0",
+                            "nonTrigMuons_phi0",
+                            "nonTrigMuons_charge0",
+                            "nonTrigMuons_pt0",
+                        ),
+                        (
+                            "trigMuons_eta0",
+                            "trigMuons_phi0",
+                            "trigMuons_charge0",
+                            "trigMuons_pt0",
+                        ),
+                    ],
+                )
+                weight_expr += "*weight_cvhSF"
 
         # prepare inputs for pixel multiplicity helpers
         cvhName = "cvhideal"

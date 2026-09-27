@@ -15,6 +15,7 @@ import narf
 from wremnants.production import (
     muon_calibration,
     muon_efficiencies_binned,
+    muon_efficiencies_cvh,
     muon_efficiencies_smooth,
     muon_prefiring,
     muon_selections,
@@ -117,6 +118,21 @@ parser.add_argument(
     default=12345,
     help="Random seed for jackknifing procedure",
 )
+parser.add_argument(
+    "--cvhEfficiencyHists",
+    action="store_true",
+    help="""Make single-muon histograms of the (uncorrected) kinematics split by CVH refit pass/fail,
+    to measure the CVH refit efficiency in data and MC (residual effects on top of the glued-module SF).
+    Requires '--muonCorrData none --muonCorrMC none' (and preferably --noSmearing), otherwise muons with a
+    failed refit are removed by the selection and the failing bin is empty.""",
+)
+parser.add_argument(
+    "--cvhEfficiencyBranchMC",
+    type=str,
+    default="cvhideal",
+    choices=["cvhideal", "cvh"],
+    help="CVH refit branch used to define pass/fail in MC ('cvh' is always used in data). The default matches the refit actually applied to MC in the analysis (ideal geometry)",
+)
 parser = parsing.set_parser_default(
     parser, "aggregateGroups", ["Diboson", "Top", "Wtaunu", "Wmunu"]
 )
@@ -130,6 +146,35 @@ logger = logging.setup_logger(__file__, args.verbose, args.noColorLogger)
 
 if args.dxybsVeto > 0 and args.dxybsVeto < args.dxybs:
     raise ValueError("When using together '--dxybsVeto X --dxybs Y' it must be X > Y.")
+
+if args.cvhEfficiencyHists and (
+    args.muonCorrData != "none" or args.muonCorrMC != "none"
+):
+    # the momentum corrections are built on the CVH refit, so a muon whose refit
+    # failed gets a garbage corrected pt and is thrown away by the selection: the
+    # CVH-failing bin would then be empty by construction
+    raise ValueError(
+        "'--cvhEfficiencyHists' requires '--muonCorrData none --muonCorrMC none', "
+        f"got --muonCorrData {args.muonCorrData} --muonCorrMC {args.muonCorrMC}"
+    )
+
+if args.cvhEfficiencyHists and args.requirePixelHits:
+    # Muon_cvhNValidPixelHits is 0 when the refit failed, same bias as above
+    raise ValueError("'--cvhEfficiencyHists' is incompatible with '--requirePixelHits'")
+
+if args.cvhEfficiencyHists and args.cvhBadModules == "veto":
+    # the veto removes exactly the regions this histogram is meant to measure
+    logger.warning(
+        "'--cvhEfficiencyHists' is measuring the bad modules, disabling their veto "
+        "(pass '--cvhBadModules none' explicitly to silence this)"
+    )
+    args.cvhBadModules = "none"
+
+if args.cvhEfficiencyHists and (args.pt[1] > 25.0 or args.pt[2] < 65.0):
+    logger.warning(
+        f"The muon pt selection ({args.pt[1]}, {args.pt[2]}) does not cover the full pt range "
+        "of the CVH efficiency histograms (25, 65), use e.g. '--pt 40 25 65' to fill it"
+    )
 
 thisAnalysis = (
     ROOT.wrem.AnalysisType.Dilepton
@@ -648,6 +693,13 @@ def build_graph(df, dataset):
         df, cvh_helper, jpsi_helper, args, dataset, smearing_helper, bias_helper
     )
 
+    if args.cvhBadModules == "veto":
+        # CVH refit efficiency holes (badly aligned modules, incl. TIB-L2 detId
+        # 369141860): remove the affected (eta,phi') rectangles from data and MC
+        # alike, so the data-only refit inefficiency needs no correction.
+        # Disabled by the checks above when measuring that inefficiency.
+        df = muon_efficiencies_cvh.apply_bad_module_veto(df, etaCut=args.vetoRecoEta)
+
     df = muon_selections.select_veto_muons(
         df,
         nMuons=2,
@@ -906,6 +958,30 @@ def build_graph(df, dataset):
             )
             weight_expr += "*weight_fullMuonSF_withTrackingReco"
 
+            if args.cvhBadModules == "sf":
+                # alternative to the geometric veto applied above: downweight MC
+                # in the affected (eta,phi') cells by the measured data/MC
+                # efficiency ratio. See muon_efficiencies_cvh.hpp; charge/pt undo
+                # the track bending.
+                df, _ = muon_efficiencies_cvh.define_cvh_weight(
+                    df,
+                    [
+                        (
+                            "trigMuons_eta0",
+                            "trigMuons_phi0",
+                            "trigMuons_charge0",
+                            "trigMuons_pt0",
+                        ),
+                        (
+                            "nonTrigMuons_eta0",
+                            "nonTrigMuons_phi0",
+                            "nonTrigMuons_charge0",
+                            "nonTrigMuons_pt0",
+                        ),
+                    ],
+                )
+                weight_expr += "*weight_cvhSF"
+
         # prepare inputs for pixel multiplicity helpers
         df = df.DefinePerSample(
             "MuonNonTrigTrig_triggerCat",
@@ -1039,6 +1115,80 @@ def build_graph(df, dataset):
         ],
     )
     results.append(hNValidPixelHitsNonTrig)
+
+    if args.cvhEfficiencyHists:
+        # Single-muon CVH refit efficiency: kinematics vs refit pass/fail, for data
+        # and MC, to look for residual data/MC differences on top of the glued-module
+        # hotspot correction (see muon_efficiencies_cvh.hpp).
+        # Everything (selection and axes) uses the uncorrected muon kinematics, since
+        # the corrected ones are undefined when the refit failed; this is enforced by
+        # requiring '--muonCorr{Data,MC} none' above.
+        # Filled once per muon, i.e. both muons of the Z candidate enter.
+        cvhEffBranch = "cvh" if dataset.is_data else args.cvhEfficiencyBranchMC
+        logger.info(
+            f"CVH refit efficiency histograms using Muon_{cvhEffBranch}Pt > 0 as pass condition"
+        )
+
+        for mu in ["trigMuons", "nonTrigMuons"]:
+            df = df.Define(f"{mu}_uncorrPt0", f"Muon_pt[{mu}][0]")
+            df = df.Define(f"{mu}_uncorrEta0", f"Muon_eta[{mu}][0]")
+            # nanoAOD phi is in [-pi,pi], the tracker modules are naturally in [0,2pi)
+            df = df.Define(
+                f"{mu}_uncorrPhi0",
+                f"static_cast<float>(Muon_phi[{mu}][0] < 0.f ? Muon_phi[{mu}][0] + 2.f*M_PI : Muon_phi[{mu}][0])",
+            )
+            df = df.Define(f"{mu}_uncorrCharge0", f"Muon_charge[{mu}][0]")
+            df = df.Define(
+                f"{mu}_passCVH0", f"Muon_{cvhEffBranch}Pt[{mu}][0] > 0.f ? 1 : 0"
+            )
+
+        for v, t in (
+            ("uncorrPt0", "float"),
+            ("uncorrEta0", "float"),
+            ("uncorrPhi0", "float"),
+            ("uncorrCharge0", "int"),
+            ("passCVH0", "int"),
+        ):
+            df = df.Define(
+                f"cvhEffMuons_{v}",
+                f"ROOT::VecOps::RVec<{t}>{{trigMuons_{v}, nonTrigMuons_{v}}}",
+            )
+
+        if dataset.is_data or args.noScaleFactors or args.cvhBadModules != "sf":
+            df = df.Alias("cvhEff_weight", "nominal_weight")
+        else:
+            # undo the hotspot scale factor, this histogram is meant to measure it
+            df = df.Define("cvhEff_weight", "nominal_weight/weight_cvhSF")
+
+        results.append(
+            df.HistoBoost(
+                "cvhEfficiency",
+                [
+                    hist.axis.Regular(8, 25.0, 65.0, name="pt"),
+                    hist.axis.Regular(96, -2.4, 2.4, name="eta"),
+                    hist.axis.Regular(
+                        72,
+                        0.0,
+                        2.0 * math.pi,
+                        name="phi",
+                        underflow=False,
+                        overflow=False,
+                    ),
+                    axis_charge,
+                    hist.axis.Integer(
+                        0, 2, name="passCVH", underflow=False, overflow=False
+                    ),
+                ],
+                [
+                    "cvhEffMuons_uncorrPt0",
+                    "cvhEffMuons_uncorrEta0",
+                    "cvhEffMuons_uncorrPhi0",
+                    "cvhEffMuons_uncorrCharge0",
+                    "cvhEffMuons_passCVH0",
+                    "cvhEff_weight",
+                ],
+            )
+        )
 
     if args.unfolding and args.poiAsNoi and dataset.group == "Zmumu":
         unfolder_z.add_poi_as_noi_histograms(
