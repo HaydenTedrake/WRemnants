@@ -1,11 +1,70 @@
 import math
 import os
 
+from wremnants.production import muon_efficiencies_5TeV
 from wremnants.utilities import binning, common, parsing, samples, theory_utils
 from wums import logging
 
 analysis_label = common.analysis_label(os.path.basename(__file__))
 parser, initargs = parsing.common_parser(analysis_label)
+parser.add_argument(
+    "--muonEfficiencyHists",
+    action="store_true",
+    help="Measure muon efficiencies (tag-free, David's CVH method: both muons of "
+    "the Z fill a pass/fail histogram; SF = eps_data/eps_MC is formed afterwards). "
+    "RELAXES the analysis muon ID to loose so the ID step is measurable at all -- "
+    "the physics histograms from such a run are NOT the analysis ones. Uses "
+    "uncorrected kinematics, since corrected pt is undefined when a refit fails.",
+)
+parser.add_argument(
+    "--muonEventScaleFactors",
+    default=None,
+    help="EVENT-level SF map (the '1HLT' single-muon trigger step) from "
+    "make_muon_efficiency_sf_5TeV.py --eventOutput. Separate from "
+    "--muonScaleFactors because it is one factor per event, not one per muon.",
+)
+parser.add_argument(
+    "--muonTriggerScaleFactors",
+    default=None,
+    help="PER-MUON trigger maps (eps_data, eps_MC + eigen shifts) from "
+    "make_muon_trigger_sf_5TeV.py -- full lowPU '1HLT' parity. Mutually "
+    "exclusive with --muonEventScaleFactors, which is the event-level "
+    "alternative to the same correction.",
+)
+parser.add_argument(
+    "--muonEffProbeTrigger",
+    default="HLT_HIMu17 || HLT_HIL3DoubleMu0",
+    help="event filter used by the MEASUREMENT run instead of HLT_HIMu17 (which "
+    "would make the '1HLT' step 1 by construction). The default is the OR of the "
+    "trigger numerator and denominator -- everything either measurement needs, "
+    "~3%% of the input. Re-running with a different, weaker path (e.g. "
+    "'HLT_HIL1DoubleMu0') gives the ALTERNATIVE measurement that "
+    "make_muon_efficiency_sf_5TeV.py --altFrom turns into effSystTnP: the "
+    "probe-selection systematic, which is the counting analogue of 13 TeV's "
+    "originalDataAltSig.",
+)
+parser.add_argument(
+    "--muonEffEtaBins",
+    type=int,
+    default=48,
+    help="eta bins for the efficiency MEASUREMENT (default 48 = 0.1 wide, the "
+    "13 TeV SF granularity). Measure fine: the SF builder can only coarsen, so "
+    "structure this run does not resolve is lost for good.",
+)
+parser.add_argument(
+    "--muonEffPtBins",
+    type=int,
+    default=10,
+    help="pt bins for the efficiency measurement (default 10).",
+)
+parser.add_argument(
+    "--muonScaleFactors",
+    default=None,
+    help="SF map from scripts/analysisTools/make_muon_efficiency_sf_5TeV.py. Applies "
+    "the nominal muon efficiency SF to MC and books the effStatTnP (one nuisance per "
+    "eta-pt-charge bin per step) and effSystTnP (one fully correlated nuisance per "
+    "step, only if the map carries an alternative measurement) template variations.",
+)
 parser.add_argument(
     "--muonCorr",
     default="none",
@@ -274,6 +333,70 @@ if args.helicityXsecsFile:
     logger.info(f"Loaded qcdScaleByHelicity helper from {args.helicityXsecsFile}")
 
 
+muon_efficiency_helper = None
+muon_efficiency_helper_syst = None
+muon_efficiency_helpers_stat = {}
+if args.muonScaleFactors:
+    if args.muonEfficiencyHists:
+        raise ValueError(
+            "--muonEfficiencyHists relaxes the muon ID to loose to MEASURE the"
+            " efficiencies; applying SFs in the same run would weight a selection"
+            " that is not the analysis one. Run the two separately."
+        )
+    (
+        muon_efficiency_helper,
+        muon_efficiency_helper_syst,
+        muon_efficiency_helpers_stat,
+    ) = muon_efficiencies_5TeV.make_muon_efficiency_helpers_5TeV(
+        # no max_pt: unlike 13 TeV (--pt upper edge) this selection puts no upper
+        # cut on the muon pt, so every bin of the map is in use. Muons above the
+        # map go to its overflow, which carries the last bin's SF and shares its
+        # nuisance (see extend_to_flow / the clamp in the stat helper).
+        args.muonScaleFactors
+    )
+    logger.info(f"Muon SF map: {args.muonScaleFactors}")
+
+muon_event_helper = None
+muon_event_helper_syst = None
+muon_event_helpers_stat = {}
+if args.muonEventScaleFactors:
+    if args.muonEfficiencyHists:
+        raise ValueError(
+            "--muonEfficiencyHists MEASURES the efficiencies on a relaxed"
+            " selection; applying SFs in the same run would weight a selection"
+            " that is not the analysis one. Run the two separately."
+        )
+    (
+        muon_event_helper,
+        muon_event_helper_syst,
+        muon_event_helpers_stat,
+    ) = muon_efficiencies_5TeV.make_muon_efficiency_event_helpers_5TeV(
+        args.muonEventScaleFactors
+    )
+    logger.info(f"Muon event-level SF map: {args.muonEventScaleFactors}")
+
+muon_trig_helper = None
+muon_trig_helpers_stat = {}
+if args.muonTriggerScaleFactors:
+    if args.muonEventScaleFactors:
+        raise ValueError(
+            "--muonTriggerScaleFactors (per muon) and --muonEventScaleFactors"
+            " (per event) are two forms of the SAME trigger correction; applying"
+            " both would correct the trigger twice. Pick one."
+        )
+    if args.muonEfficiencyHists:
+        raise ValueError(
+            "--muonEfficiencyHists MEASURES the efficiencies; applying SFs in the"
+            " same run would weight a selection that is not the analysis one."
+        )
+    muon_trig_helper, muon_trig_helpers_stat = (
+        muon_efficiencies_5TeV.make_muon_trigger_helpers_5TeV(
+            args.muonTriggerScaleFactors
+        )
+    )
+    logger.info(f"Muon per-muon trigger maps: {args.muonTriggerScaleFactors}")
+
+
 def build_graph(df, dataset):
     logger.info(f"build graph for dataset: {dataset.name}")
 
@@ -465,7 +588,31 @@ def build_graph(df, dataset):
         df = df.Alias("Muon_pt_corr", "Muon_pt")
 
     # filter events
-    df = df.Filter("HLT_HIMu17")
+    #
+    # The efficiency MEASUREMENT run skips this. Two reasons, and the first is a
+    # correctness requirement, not a preference:
+    #  * the '1HLT' step measures P(HLT_HIMu17 | orthogonal trigger). Applying
+    #    HLT_HIMu17 here would make that efficiency 1 by construction, exactly as
+    #    measuring the ID after the ID cut would. The step applies its own
+    #    denominator instead (HLT_HIL3DoubleMu0, inside
+    #    book_event_efficiency_hist).
+    #  * it also removes the L3-trigger bias on the per-muon probes: HLT_HIMu17
+    #    needs a global-like track, so the muon that fired it is biased toward
+    #    passing isGlobal. That bias cancels in the SF (measured: the SF moves by
+    #    at most 0.056% when the probe sample is reselected with L3/L2/L1
+    #    triggers, all within ~2 sigma of zero), so dropping the filter changes
+    #    the per-muon numbers negligibly while making them cleaner.
+    if args.muonEfficiencyHists:
+        # The measurement cannot apply HLT_HIMu17 (the '1HLT' step would then be
+        # 1 by construction), but it must not drop the trigger filter either:
+        # without it the full 5.16M events per data file go through the whole
+        # selection instead of the ~100k that fire, and the job goes from ~5 min
+        # to over 12 h (job 6614264 timed out exactly this way). Filtering on the
+        # OR of the numerator and denominator paths keeps every event either
+        # measurement needs and still cuts ~97% of the input.
+        df = df.Filter(args.muonEffProbeTrigger, "measurement probe trigger")
+    else:
+        df = df.Filter("HLT_HIMu17")
 
     # available columns, see: https://cms-xpog.docs.cern.ch/autoDoc/
 
@@ -473,9 +620,16 @@ def build_graph(df, dataset):
     df = df.Define("nLepton", "nElectron + nMuon")
 
     # ---- Good muons (for Z->mumu selection) ----
+    # When measuring efficiencies the probe must not already carry the
+    # requirement being measured, so the analysis ID is relaxed to loose.
+    _muId = (
+        "Muon_looseId"
+        if args.muonEfficiencyHists
+        else "Muon_mediumId && Muon_isGlobal"
+    )
     df = df.Define(
         "goodMu",
-        "Muon_pt_corr > 18 && abs(Muon_eta) < 2.4 && Muon_mediumId && Muon_isGlobal",
+        f"Muon_pt_corr > 18 && abs(Muon_eta) < 2.4 && {_muId}",
     )
     df = df.Define("goodMu_idx", "ROOT::VecOps::Nonzero(goodMu)")
     df = df.Filter("goodMu_idx.size() == 2", "Exactly two good muons")
@@ -584,10 +738,36 @@ def build_graph(df, dataset):
             )
             applied_theory_corrs.append(theory_corr_name)
 
-        if applied_theory_corrs:
-            df = df.Define(
-                "nominal_weight", f"{applied_theory_corrs[0]}Weight_tensor[0]"
+        # The muon efficiency SF is folded into the definition of
+        # nominal_weight rather than Redefine'd onto it: without theory
+        # corrections nominal_weight is an Alias, and an alias cannot be
+        # redefined.
+        _nomw = (
+            f"{applied_theory_corrs[0]}Weight_tensor[0]"
+            if applied_theory_corrs
+            else "exp_weight"
+        )
+        if muon_event_helper is not None:
+            df, _evt_col = muon_efficiencies_5TeV.define_nominal_event_sf_weight(
+                df, muon_event_helper
             )
+            _nomw = f"{_nomw}*{_evt_col}"
+        if muon_trig_helper is not None:
+            # define_muon_sf_columns runs here (idempotent-unsafe), so the per-muon
+            # ID SF below reuses the same columns rather than redefining them
+            df, _trig_col = muon_efficiencies_5TeV.define_nominal_trigger_sf_weight(
+                df, muon_trig_helper
+            )
+            _nomw = f"{_nomw}*{_trig_col}"
+        if muon_efficiency_helper is not None:
+            df, _sf_col = muon_efficiencies_5TeV.define_nominal_sf_weight(
+                df, muon_efficiency_helper, skip_columns=muon_trig_helper is not None
+            )
+            df = df.Define("nominal_weight", f"{_nomw}*{_sf_col}")
+        elif muon_trig_helper is not None or muon_event_helper is not None:
+            df = df.Define("nominal_weight", _nomw)
+        elif applied_theory_corrs:
+            df = df.Define("nominal_weight", _nomw)
         else:
             df = df.Alias("nominal_weight", "exp_weight")
 
@@ -609,6 +789,48 @@ def build_graph(df, dataset):
                 [*ew_cols, "nominal_weight"],
             )
             applied_ew_corrs.append(ew_corr_name)
+
+    # ---- Muon efficiency measurement (opt-in) ----
+    if args.muonEfficiencyHists:
+        # reco x idip is the factorisation the SF map uses (13 TeV parity);
+        # the merged 'id' step is booked too as a free closure test, since
+        # eps(id) must equal eps(reco)*eps(idip) bin by bin
+        eff_steps = [
+            muon_efficiencies_5TeV.cvh_step(is_data=dataset.is_data),
+            muon_efficiencies_5TeV.reco_step(),
+            muon_efficiencies_5TeV.idip_step(),
+            muon_efficiencies_5TeV.id_step(),
+        ]
+        eff_steps = muon_efficiencies_5TeV.available_steps(
+            df, dataset.is_data, eff_steps
+        )
+        # the '1HLT' step: event level, so it is booked from the event
+        # dataframe rather than from a probe collection
+        for _evt_step in muon_efficiencies_5TeV.available_steps(
+            df, dataset.is_data, [muon_efficiencies_5TeV.trigger_step()]
+        ):
+            # (a) the event-level map, binned in the fit variables
+            muon_efficiencies_5TeV.book_event_efficiency_hist(
+                df, results, _evt_step
+            )
+            # (b) the muon-PAIR counts the per-muon fit needs, for full lowPU
+            # ('1HLT') parity -- see the comment above trigger_bin_index_expr
+            muon_efficiencies_5TeV.book_trigger_pair_hist(
+                df, results, _evt_step
+            )
+
+        for _step in eff_steps:
+            df_eff = muon_efficiencies_5TeV.define_probes(df, _step)
+            # phi is carried for the cvh step so module-level (eta, phi)
+            # structure -- David's glued-module hotspots -- stays visible
+            muon_efficiencies_5TeV.book_efficiency_hist(
+                df_eff,
+                results,
+                _step,
+                with_phi=(_step.name == "cvh"),
+                n_eta=args.muonEffEtaBins,
+                n_pt=args.muonEffPtBins,
+            )
 
     # ---- Fill histograms ----
     hist_nLepton = df.HistoBoost(
@@ -729,6 +951,41 @@ def build_graph(df, dataset):
     # DATA MINIMUM BIN CONTENT: 88.0 at bin (ptll index 35, yll index 3) → ptll ∈ [28, 30) GeV, yll ∈ [-0.5, -0.25)
 
     if not dataset.is_data:
+        # Muon efficiency template variations, on the same axes as the fit
+        # templates. Booked for every MC process, signal and background alike:
+        # the SF is applied to all of them, so they all respond to it.
+        if muon_trig_helpers_stat:
+            df = muon_efficiencies_5TeV.add_muon_trigger_unc_hists_5TeV(
+                results,
+                df,
+                muon_trig_helpers_stat,
+                [axis_ptll, axis_yll],
+                ["ptll", "yll"],
+                base_name="ptll",
+            )
+
+        if muon_event_helpers_stat:
+            df = muon_efficiencies_5TeV.add_muon_efficiency_event_unc_hists_5TeV(
+                results,
+                df,
+                muon_event_helpers_stat,
+                muon_event_helper_syst,
+                [axis_ptll, axis_yll],
+                ["ptll", "yll"],
+                base_name="ptll",
+            )
+
+        if muon_efficiency_helpers_stat:
+            df = muon_efficiencies_5TeV.add_muon_efficiency_unc_hists_5TeV(
+                results,
+                df,
+                muon_efficiency_helpers_stat,
+                muon_efficiency_helper_syst,
+                [axis_ptll, axis_yll],
+                ["ptll", "yll"],
+                base_name="ptll",
+            )
+
         if applied_theory_corrs:
             systematics.add_theory_corr_hists(
                 results,

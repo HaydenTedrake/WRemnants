@@ -65,6 +65,16 @@ parser.add_argument(
     "--histName", default="ptll", help="Histogram name to use (default: ptll)"
 )
 parser.add_argument(
+    "--ptllMax",
+    type=float,
+    default=None,
+    help="Drop ptll bins above this edge before building the tensor. Use 44 to "
+    "match the 13 TeV fit range (our card otherwise carries an extra wide "
+    "44-100 GeV bin holding ~5.6%% of events). Bins above the cut are DISCARDED, "
+    "not folded into an overflow, which is what the 13 TeV setup does "
+    "(its channel_info has flow=False).",
+)
+parser.add_argument(
     "--procFilters",
     nargs="*",
     default=[],
@@ -141,6 +151,16 @@ parser.add_argument(
     "histmaker's nominal_prefsr_yieldsUnfolding/prefsr hists)",
 )
 parser.add_argument(
+    "--effPruneThreshold",
+    type=float,
+    default=1e-4,
+    help="drop a muon-efficiency nuisance whose largest relative template "
+    "variation is below this. The variations are almost pure normalisation, so "
+    "negligible ones are near-degenerate with each other and with luminosity; "
+    "keeping them inflates the traditional impacts instead of adding "
+    "information. 0 keeps everything that is not bit-identical to nominal.",
+)
+parser.add_argument(
     "--lumiScale",
     type=float,
     default=1.0,
@@ -212,6 +232,29 @@ for proc in mc_procs:
     )
 
 
+def _crop_ptll(h):
+    """Drop ptll bins above --ptllMax.
+
+    Applied to EVERY histogram that enters the tensor (nominal, all theory and
+    experimental variations, and data), so the shapes stay consistent. If one
+    were missed the tensorwriter would fail on a shape mismatch rather than
+    silently misalign, but keep the call sites in sync anyway.
+
+    The SCETlib-NP response matrix needs no change: param_model.py:605
+    (_crop_R_to_fit) already handles "R has ptll [0, ..., 44, 100] while the
+    fit ends at 44" -- that is exactly the 13 TeV configuration.
+    """
+    if args.ptllMax is None or not hasattr(h, "axes"):
+        return h
+    if "ptll" not in [a.name for a in h.axes]:
+        return h
+    edges = np.asarray(h.axes["ptll"].edges, dtype=float)
+    nkeep = int((edges[1:] <= args.ptllMax + 1e-9).sum())
+    if nkeep == len(h.axes["ptll"]):
+        return h
+    return h[{"ptll": slice(0, nkeep)}]
+
+
 def _scale_mc(h, scale):
     """Apply the xsec*lumi normalization to a MC histogram.
 
@@ -227,7 +270,7 @@ def _scale_mc(h, scale):
         view = hs.view(flow=True)
         if hasattr(view, "variance"):
             view.variance /= args.lumiScale
-    return hs
+    return _crop_ptll(hs)
 
 
 # Load MC histograms (xsec*lumi normalized)
@@ -273,7 +316,7 @@ def _corr_hist_names(results, proc):
 def _get_hist(results, proc, name):
     h_proxy = results[proc]["output"][name]
     h = h_proxy.get() if hasattr(h_proxy, "get") else h_proxy
-    return _scale_mc(h, proc_scale[proc]) if proc in proc_scale else h
+    return _scale_mc(h, proc_scale[proc]) if proc in proc_scale else _crop_ptll(h)
 
 
 h_theory_corr_pdfas_dict = {}
@@ -423,6 +466,23 @@ for proc in mc_procs:
         if hname in results[proc]["output"]:
             h_bcmass_dicts[key][proc] = _get_hist(results, proc, hname)
             print_flush(f"{proc}: found b,c quark mass variation hist {hname}")
+
+# Muon efficiency variation templates (mz_5TeV.py --muonScaleFactors), loaded
+# here because everything in `results` is a lazy H5PickleProxy and the file is
+# closed a few lines below. Keyed proc -> {hist name: hist}; the SF is applied to
+# every MC process, so every MC process has them.
+EFF_STAT_PREFIX = "ptll_effStatTnP_"  # "ptll" is the histmaker's base_name
+EFF_SYST_NAME = "ptll_effSystTnP"
+h_muon_eff_dict = {}
+for proc in mc_procs:
+    names = sorted(
+        k
+        for k in results[proc]["output"]
+        if k.startswith(EFF_STAT_PREFIX) or k == EFF_SYST_NAME
+    )
+    if names:
+        h_muon_eff_dict[proc] = {n: _get_hist(results, proc, n) for n in names}
+        print_flush(f"{proc}: found muon efficiency variation hists {names}")
 
 # pseudodata for bias tests: load the alternative-model histogram from the
 # (first) signal process before the file is closed
@@ -877,6 +937,151 @@ for proc_name, hvars in h_muon_var_dict.items():
             groups=[fine_group, "muonCalibration", "experiment"],
         )
         print_flush(f"Added {syst_name} systematic for process {proc_name}")
+
+# Muon efficiency scale factors, from mz_5TeV.py --muonScaleFactors:
+#   ptll_effStatTnP_<step>  one nuisance per (eta, pt, charge) bin of the SF map
+#   ptll_effSystTnP         one fully correlated nuisance per step
+#
+# Both are ONE-SIDED and mirrored. A stat variation is SF -> SF + sigma, a single
+# shift of a positive quantity, so there is no independent down template to read;
+# mirror=True is the same treatment the 13 TeV effStatTnP nuisances get.
+#
+# Cells of the SF map with no probes have SF 1 and zero variance, so their
+# variation is identically the nominal. They are dropped here rather than handed
+# to the fit: a nuisance whose up and down templates both equal the nominal is a
+# flat direction in the likelihood, not a small uncertainty. The histmaker warns
+# how many such cells the map has.
+#
+# Applied to every MC process, signal and background alike, because the SF
+# multiplies all of them; correlated across processes through the shared name.
+for proc_name in sorted(h_muon_eff_dict):
+    if proc_name not in h_mc_base:
+        continue
+    out = h_muon_eff_dict[proc_name]
+    fit_axes = h_mc_base[proc_name].axes.name
+    h_nom_vals = h_mc_base[proc_name].values()
+    n_stat = n_syst = n_flat = 0
+
+    for hist_name in sorted(k for k in out if k.startswith(EFF_STAT_PREFIX)):
+        step = hist_name[len(EFF_STAT_PREFIX) :]
+        h_stat = out[hist_name]
+        # The variation axes are the trailing ones appended by add_syst_hist. Two
+        # shapes occur and both must be handled:
+        #   (eta, pt, charge)  per-bin variations of a COUNTED map
+        #   (eigenMode,)       eigenvector variations of a FITTED map -- the
+        #                      per-muon trigger, whose per-bin efficiencies are
+        #                      strongly correlated, so independent per-bin
+        #                      nuisances would mis-model the uncertainty
+        # Any other non-fit axis (yll when the fit is 1D in ptll) is projected out.
+        var_axes = [a for a in h_stat.axes.name if a not in fit_axes]
+        if var_axes[-3:] == ["eta", "pt", "charge"]:
+            var_axes = ["eta", "pt", "charge"]
+
+            def label(idx):
+                return f"eta{idx[0]}_pt{idx[1]}_q{idx[2]}"
+
+        elif var_axes[-1:] == ["eigenMode"]:
+            var_axes = ["eigenMode"]
+
+            def label(idx):
+                return f"eig{idx[0]}"
+
+        elif var_axes[-2:] == ["effBinYll", "effBinPtll"]:
+            # the EVENT-level map: one nuisance per (yll, ptll) cell of the map.
+            # Named effBin* rather than yll/ptll because the tensor axes sit
+            # alongside the fit axes and hist forbids duplicate names.
+            var_axes = ["effBinYll", "effBinPtll"]
+
+            def label(idx):
+                return f"yll{idx[0]}_ptll{idx[1]}"
+
+        else:
+            print_flush(
+                f"{hist_name}: unrecognised variation axes {var_axes}, skipping"
+            )
+            continue
+        h_stat = h_stat.project(*fit_axes, *var_axes)
+        sizes = [h_stat.axes[a].size for a in var_axes]
+        for idx in np.ndindex(*sizes):
+            sl = {a: int(i) for a, i in zip(var_axes, idx)}
+            h_var = _rebin(h_stat[sl].project(*fit_axes)) * mc_scale
+            # Prune by SIZE, not just by exact flatness. np.allclose's default
+            # 1e-5 relative tolerance keeps thousands of negligible-but-nonzero
+            # variations, and because the efficiency variations are almost pure
+            # NORMALISATION they are near-degenerate with each other and with the
+            # luminosity nuisance. Keeping them does not add information, it adds
+            # degenerate directions, which inflates the traditional impacts of
+            # whatever they are degenerate with (observed: luminosity halves
+            # while every theory row grows ~20-30%).
+            rel = np.max(np.abs(h_var.values() - h_nom_vals)
+                         / np.maximum(np.abs(h_nom_vals), 1e-12))
+            if rel < args.effPruneThreshold:
+                n_flat += 1
+                continue
+            writer.add_systematic(
+                h_var,
+                f"effStatTnP_{step}_{label(idx)}",
+                proc_name,
+                channel_name,
+                mirror=True,
+                constrained=True,
+                groups=[
+                    # the trigger DATA/MC blocks share the 'trigger' fine group,
+                    # matching lowPU's muSF_HLT_DATA_stat / muSF_HLT_MC_stat
+                    f"muon_eff_stat_{step.split('_')[0]}",
+                    "muon_eff_stat",
+                    "muon_eff_all",
+                    "experiment",
+                ],
+            )
+            n_stat += 1
+
+    if EFF_SYST_NAME in out:
+        h_syst = out[EFF_SYST_NAME]
+        # the step axis is the LAST one, appended by add_syst_hist. It is an
+        # Integer axis whose NAME is the joined step names (see
+        # make_muon_efficiency_helpers_5TeV: a StrCategory cannot be used as a
+        # tensor axis because the python bindings give it an overflow bin).
+        step_axis = h_syst.axes.name[-1]
+        steps = step_axis.split("-")
+        if len(steps) != h_syst.axes[step_axis].size:
+            print_flush(
+                f"{EFF_SYST_NAME}: step axis '{step_axis}' names {len(steps)} steps"
+                f" but has {h_syst.axes[step_axis].size} bins, skipping"
+            )
+        else:
+            h_syst = h_syst.project(*fit_axes, step_axis)
+            for istep, step in enumerate(steps):
+                h_var = (
+                    _rebin(h_syst[{step_axis: istep}].project(*fit_axes)) * mc_scale
+                )
+                if np.allclose(h_var.values(), h_nom_vals):
+                    print_flush(
+                        f"effSystTnP_{step} is identical to nominal for {proc_name}"
+                        " (the SF map carries no alternative measurement?), skipping"
+                    )
+                    continue
+                writer.add_systematic(
+                    h_var,
+                    f"effSystTnP_{step}",
+                    proc_name,
+                    channel_name,
+                    mirror=True,
+                    constrained=True,
+                    groups=[
+                        f"muon_eff_syst_{step}",
+                        "muon_eff_syst",
+                        "muon_eff_all",
+                        "experiment",
+                    ],
+                )
+                n_syst += 1
+
+    if n_stat or n_syst or n_flat:
+        print_flush(
+            f"{proc_name}: added {n_stat} effStatTnP and {n_syst} effSystTnP"
+            f" systematics ({n_flat} empty map cells dropped)"
+        )
 
 # Z boson mass uncertainty: +-2.1 MeV (PDG) Breit-Wigner reweighting entries
 # of the massWeight tensor, correlated across Z MC processes
