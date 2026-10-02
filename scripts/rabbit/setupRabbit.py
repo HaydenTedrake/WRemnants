@@ -30,7 +30,7 @@ from wremnants.postprocessing.syst_tools import (
     scale_hist_up_down,
     scale_hist_up_down_corr_from_file,
 )
-from wremnants.production import helicity_utils
+from wremnants.production import helicity_utils, muon_efficiencies_insitu
 from wremnants.utilities import binning, common, parsing, theory_utils
 from wums import boostHistHelpers as hh
 from wums import logging, output_tools
@@ -132,6 +132,35 @@ def make_subparsers(parser, argv=None):
         default=None,
         choices=["unfolding", "theoryAgnosticNormVar", "theoryAgnosticPolVar"],
         help="Select analysis mode to run. Default is the traditional analysis",
+    )
+    parser.add_argument(
+        "--muonInsituEfficiency",
+        action="store_true",
+        help="Add the in-situ muon efficiency Chebyshev coefficients (per-category "
+        "ID/HLT/Iso) as unconstrained nuisances. Requires the histmaker to have been "
+        "run with --insituEffMCFile so the muonInsituEff histograms are present.",
+    )
+    parser.add_argument(
+        "--insituEffMCFile",
+        type=str,
+        nargs="+",
+        default=None,
+        help="MC efficiency pkl used by the histmaker for --muonInsituEfficiency. "
+        "Storing it as auxiliary data lets rabbit's InSituEfficiencyBound penalty "
+        "keep the fitted scale factors inside the physical region "
+        "(eMC*SF < 1); without it the unconstrained coefficients can leave it "
+        "where little data constrains them.",
+    )
+
+    parser.add_argument(
+        "--insituSFFile",
+        type=str,
+        default=None,
+        help="Accumulated theta_central pkl that the histmaker was run with "
+        "(--insituSFFile there). The bound must be imposed on the TOTAL scale "
+        "factor, 1 + P(theta_central) + delta*P(n); on iteration 0 this is None "
+        "and the offset is zero, but on later iterations omitting it applies the "
+        "bound at the wrong point.",
     )
 
     tmpKnownArgs, _ = parser.parse_known_args(argv)
@@ -521,6 +550,19 @@ def make_parser(parser=None, argv=None):
         default=[],
         nargs="*",
         help="Restrict axis to this range (assumes pairs of values by axis, with trailing axes optional)",
+    )
+    parser.add_argument(
+        "--decorrelateMuonCalibration",
+        action="store_true",
+        help="""
+        Give the muon momentum scale and resolution nuisances per-analysis names, so
+        they are not shared between inputs. Needed when W and Z are fitted together:
+        the calibration uncertainty of each measurement is its own, and leaving the
+        nuisances correlated lets the Z constrain the W's muon scale and resolution
+        (and vice versa). The nuisances are prefixed 'dilepton_' or 'singlelepton_';
+        their systematic groups (scaleCrctn, muonCalibration, ...) stay shared, so
+        impacts are still reported together.
+        """,
     )
     parser.add_argument(
         "--decorrSystByVar",
@@ -1865,6 +1907,14 @@ def setup(
             decorwidth=decorwidth,
         )
 
+    if args.muonInsituEfficiency and not stat_only:
+        # in-situ ID/HLT/Iso efficiency Chebyshev coefficients as unconstrained
+        # nuisances; names are channel independent so they correlate across the
+        # 4 category channels (the cross-category in-situ constraint)
+        rabbit_helpers.add_muon_insitu_efficiency_systs(
+            datagroups, inputBaseName, passSystToFakes=passSystToFakes
+        )
+
     add_theory_uncertainties = not stat_only and not args.noTheoryUnc
 
     # this appears within doStatOnly because technically these nuisances should be part of it
@@ -2627,6 +2677,15 @@ def setup(
             ]
             effTypesUt = [x for x in effStatTypes if x not in effTypesNoUt]
             effSystTypes = [*effTypesNoIso, "iso"]
+            if args.muonInsituEfficiency:
+                # ID/HLT/Iso are determined in-situ; only the reco/tracking
+                # external efficiency uncertainties are propagated here
+                effStatTypes = ["reco", "tracking"]
+                effSystTypes = ["reco", "tracking"]
+                effTypesUt = []
+                allEffTnP = [f"effStatTnP_sf_{eff}" for eff in effStatTypes] + [
+                    "effSystTnP"
+                ]
             effCommonGroups = [
                 "muon_eff_all",
                 "experiment",
@@ -2635,17 +2694,28 @@ def setup(
             ]
             for name in allEffTnP:
                 if "Syst" in name:
-                    axes = ["reco-tracking-idip-trigger-iso", "n_syst_variations"]
-                    axlabels = ["WPSYST", "_etaDecorr"]
-                    nameReplace = [
-                        ("WPSYST0", "reco"),
-                        ("WPSYST1", "tracking"),
-                        ("WPSYST2", "idip"),
-                        ("WPSYST3", "trigger"),
-                        ("WPSYST4", "iso"),
-                        ("effSystTnP", "effSyst"),
-                        ("etaDecorr0", "fullyCorr"),
-                    ]
+                    if args.muonInsituEfficiency:
+                        # reco/tracking-only effSyst working-point axis
+                        axes = ["reco-tracking", "n_syst_variations"]
+                        axlabels = ["WPSYST", "_etaDecorr"]
+                        nameReplace = [
+                            ("WPSYST0", "reco"),
+                            ("WPSYST1", "tracking"),
+                            ("effSystTnP", "effSyst"),
+                            ("etaDecorr0", "fullyCorr"),
+                        ]
+                    else:
+                        axes = ["reco-tracking-idip-trigger-iso", "n_syst_variations"]
+                        axlabels = ["WPSYST", "_etaDecorr"]
+                        nameReplace = [
+                            ("WPSYST0", "reco"),
+                            ("WPSYST1", "tracking"),
+                            ("WPSYST2", "idip"),
+                            ("WPSYST3", "trigger"),
+                            ("WPSYST4", "iso"),
+                            ("effSystTnP", "effSyst"),
+                            ("etaDecorr0", "fullyCorr"),
+                        ]
                     mirror = True
                     groupName = "muon_eff_syst"
                     scale = args.effSystScale
@@ -3204,6 +3274,23 @@ def setup(
             passToFakes=passSystToFakes,
         )
 
+    # Muon calibration nuisance naming. Correlating the momentum scale and
+    # resolution across a combined W+Z fit would let one measurement constrain
+    # the other's calibration, which is not what the uncertainty means, so the
+    # names can be made per-analysis. This has to go on baseName, not name:
+    # baseName is what the individual nuisances are built from (Scale_correction_unc0
+    # and so on), while name is only the group label used for logging and for
+    # --excludeNuisances matching.
+    muoncal_tag = ""
+    if args.decorrelateMuonCalibration:
+        muoncal_tag = "dilepton_" if dilepton else "singlelepton_"
+        logger.info(
+            f"Muon calibration nuisances prefixed '{muoncal_tag}' for {channel}"
+        )
+
+    def muoncal(base):
+        return muoncal_tag + base
+
     ## decorrelated momentum scale and resolution, when requested
     if not dilepton and "ptscale" in args.decorrSystByVar and decorr_syst_var in fitvar:
         datagroups.addSystematic(
@@ -3211,7 +3298,7 @@ def setup(
             name="muonScaleSyst_responseWeightsDecorr",
             processes=["single_v_samples"],
             groups=["scaleCrctn", "muonCalibration", "experiment", "expNoLumi"],
-            baseName="Scale_correction_",
+            baseName=muoncal("Scale_correction_"),
             systAxes=["unc", f"{decorr_syst_var}_", "downUpVar"],
             passToFakes=passSystToFakes,
             scale=args.calibrationStatScaling,
@@ -3228,7 +3315,7 @@ def setup(
             name="muonScaleClosSyst_responseWeightsDecorr",
             processes=["single_v_samples"],
             groups=["scaleClosCrctn", "muonCalibration", "experiment", "expNoLumi"],
-            baseName="ScaleClos_correction_",
+            baseName=muoncal("ScaleClos_correction_"),
             systAxes=["unc", f"{decorr_syst_var}_", "downUpVar"],
             passToFakes=passSystToFakes,
             actionRequiresNomi=True,
@@ -3243,7 +3330,7 @@ def setup(
             "muonScaleSyst_responseWeights",
             processes=["single_v_samples"],
             groups=["scaleCrctn", "muonCalibration", "experiment", "expNoLumi"],
-            baseName="Scale_correction_",
+            baseName=muoncal("Scale_correction_"),
             systAxes=["unc", "downUpVar"],
             passToFakes=passSystToFakes,
             scale=args.calibrationStatScaling,
@@ -3252,7 +3339,7 @@ def setup(
             "muonScaleClosSyst_responseWeights",
             processes=["single_v_samples"],
             groups=["scaleClosCrctn", "muonCalibration", "experiment", "expNoLumi"],
-            baseName="ScaleClos_correction_",
+            baseName=muoncal("ScaleClos_correction_"),
             systAxes=["unc", "downUpVar"],
             passToFakes=passSystToFakes,
         )
@@ -3271,7 +3358,7 @@ def setup(
         "muonScaleClosASyst_responseWeights",
         processes=["single_v_samples"],
         groups=["scaleClosACrctn", "muonCalibration", "experiment", "expNoLumi"],
-        baseName="ScaleClosA_correction_",
+        baseName=muoncal("ScaleClosA_correction_"),
         systAxes=["unc", "downUpVar"],
         passToFakes=passSystToFakes,
         scale=scaleA,
@@ -3281,7 +3368,7 @@ def setup(
             "muonScaleClosMSyst_responseWeights",
             processes=["single_v_samples"],
             groups=["scaleClosMCrctn", "muonCalibration", "experiment", "expNoLumi"],
-            baseName="ScaleClosM_correction_",
+            baseName=muoncal("ScaleClosM_correction_"),
             systAxes=["unc", "downUpVar"],
             passToFakes=passSystToFakes,
             scale=scaleM,
@@ -3303,7 +3390,7 @@ def setup(
                     "experiment",
                     "expNoLumi",
                 ],
-                baseName="Resolution_correction_",
+                baseName=muoncal("Resolution_correction_"),
                 systAxes=["smearing_variation", f"{decorr_syst_var}_"],
                 passToFakes=passSystToFakes,
                 scale=args.resolutionStatScaling,
@@ -3325,7 +3412,7 @@ def setup(
                     "experiment",
                     "expNoLumi",
                 ],
-                baseName="Resolution_correction_",
+                baseName=muoncal("Resolution_correction_"),
                 systAxes=["smearing_variation"],
                 passToFakes=passSystToFakes,
                 scale=args.resolutionStatScaling,
@@ -3379,7 +3466,7 @@ def setup(
             name="muonScaleSyst_responseWeightsDecorr",
             processes=["single_v_samples"],
             groups=["scaleCrctn", "muonCalibration", "experiment", "expNoLumi"],
-            baseName="Scale_correction_",
+            baseName=muoncal("Scale_correction_"),
             systAxes=["unc", "run_", "downUpVar"],
             passToFakes=passSystToFakes,
             scale=args.calibrationStatScaling,
@@ -3393,7 +3480,7 @@ def setup(
             name="muonScaleClosSyst_responseWeightsDecorr",
             processes=["single_v_samples"],
             groups=["scaleClosCrctn", "muonCalibration", "experiment", "expNoLumi"],
-            baseName="ScaleClos_correction_",
+            baseName=muoncal("ScaleClos_correction_"),
             systAxes=["unc", "run_", "downUpVar"],
             passToFakes=passSystToFakes,
             actionRequiresNomi=True,
@@ -3413,7 +3500,7 @@ def setup(
                     "experiment",
                     "expNoLumi",
                 ],
-                baseName="Resolution_correction_",
+                baseName=muoncal("Resolution_correction_"),
                 systAxes=["smearing_variation", "run_"],
                 passToFakes=passSystToFakes,
                 scale=args.resolutionStatScaling,
@@ -3776,6 +3863,35 @@ if __name__ == "__main__":
                     },
                 },
             )
+
+    if args.muonInsituEfficiency and args.insituEffMCFile is not None:
+        # Grid for rabbit's InSituEfficiencyBound penalty. The coefficients are
+        # unconstrained, so nothing in the likelihood stops the implied data
+        # efficiency eMC*(1+P) from passing 1, where the fail probability turns
+        # negative; the penalty needs the same eMC the histmaker used and the
+        # basis evaluated on it.
+        # theta_central of the histograms being fitted: the bound has to be
+        # imposed on the TOTAL scale factor, 1 + P(theta_central) + delta*P(n),
+        # and on any iteration after the first that offset is not zero.
+        theta_central = (
+            muon_efficiencies_insitu.load_insitu_central(args.insituSFFile)
+            if getattr(args, "insituSFFile", None)
+            else None
+        )
+        aux = muon_efficiencies_insitu.merge_insitu_bound_aux(
+            [
+                muon_efficiencies_insitu.build_insitu_bound_aux(
+                    muon_efficiencies_insitu.make_muon_insitu_effMC_helper(f),
+                    theta_central=theta_central,
+                )
+                for f in args.insituEffMCFile
+            ]
+        )
+        logger.info(
+            f"Store in-situ efficiency bound as auxiliary data "
+            f"'{muon_efficiencies_insitu.INSITU_BOUND_AUX_NAME}'"
+        )
+        writer.add_auxiliary(muon_efficiencies_insitu.INSITU_BOUND_AUX_NAME, aux)
 
     # propagate meta info into result file
     meta = {
