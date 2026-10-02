@@ -182,7 +182,9 @@ def _parse_process_entry(entry):
 # Both the dilepton (z_dilepton) and single-muon (w_mass) histmakers emit the
 # same effMCprobe_{nominal,failIso,failHLT,failID} probe spectra (eta, pt,
 # charge, genUT), so the per-step recombination below is identical for both.
-supported_modes = ("z_dilepton", "w_mass")
+# The 5.02 TeV dilepton histmaker (mz_5TeV.py, mode z_lowpu) books them the same
+# way as mz_dilepton.py.
+supported_modes = ("z_dilepton", "w_mass", "z_lowpu")
 
 # Map each requested process to the first input file that provides its probe
 # spectra (group present with members). Each input gets its own Datagroups, so

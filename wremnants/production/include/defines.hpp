@@ -15,7 +15,15 @@ using Vec_ui = ROOT::VecOps::RVec<unsigned int>;
 
 enum class AnalysisType { Wmass = 0, Wlike, Dilepton };
 
-enum class Era { Era_2016PreVFP, Era_2016PostVFP, Era_2017, Era_2018 };
+// Era_2017G is the 5.02 TeV low-PU run (era string "2017G"); the histmakers
+// substitute the era string directly into goodMuonTriggerCandidate<Era_{era}>.
+enum class Era {
+  Era_2016PreVFP,
+  Era_2016PostVFP,
+  Era_2017,
+  Era_2018,
+  Era_2017G
+};
 
 const unsigned int MUON_PDGID = 13;
 

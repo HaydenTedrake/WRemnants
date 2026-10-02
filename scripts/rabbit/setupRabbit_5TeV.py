@@ -26,6 +26,7 @@ from wremnants.postprocessing.theory_variation_labels import (
     TNP_UNCERTAINTIES,
     TRANSITION_FO_UNCERTAINTIES,
 )
+from wremnants.production import muon_efficiencies_insitu
 
 try:
     from wremnants.postprocessing.theory_variation_labels import (
@@ -178,6 +179,29 @@ parser.add_argument(
     "sqrt(factor). Default (quadratic) keeps the RELATIVE MC-stat uncertainty "
     "unchanged, i.e. the same MC sample simply reweighted.",
 )
+parser.add_argument(
+    "--muonInsituEfficiency",
+    action="store_true",
+    help="In-situ muon efficiencies (WRemnants PR #709): add the failIso, "
+    "failHLT and failID control channels and the ID/HLT/Iso Chebyshev "
+    "coefficients as unconstrained nuisances. Needs mz_5TeV.py output made "
+    "with --insituEffMCFile.",
+)
+parser.add_argument(
+    "--insituEffMCFile",
+    type=str,
+    nargs="+",
+    default=None,
+    help="effMC pkl the histmaker used. Stored as auxiliary data for rabbit's "
+    "InSituEfficiencyBound penalty, which keeps eMC*SF < 1 (as in setupRabbit.py).",
+)
+parser.add_argument(
+    "--insituSFFile",
+    type=str,
+    default=None,
+    help="Accumulated theta_central pkl the histmaker was run with (iteration "
+    ">= 1), so the bound applies to the total scale factor.",
+)
 args = parser.parse_args()
 
 # Load data from HDF5 file
@@ -273,1012 +297,1104 @@ def _scale_mc(h, scale):
     return _crop_ptll(hs)
 
 
-# Load MC histograms (xsec*lumi normalized)
-h_mc_dict = {}
-for proc in mc_procs:
-    if "output" in results[proc] and hist_name in results[proc]["output"]:
-        h_proxy = results[proc]["output"][hist_name]
-        h = h_proxy.get() if hasattr(h_proxy, "get") else h_proxy
-        h_mc_dict[proc] = _scale_mc(h, proc_scale[proc])
-
-# Identify signal processes before closing file
-signal_procs = [p for p in mc_procs if "Zmumu" in p or "Ztautau" in p]
-
-
-# EW/FSR corrections (borrowed 13 TeV ratio files, filled by mz_5TeV.py)
-EW_CORR_TAGS = (
-    "powhegFOEW",
-    "pythiaew_ISR",
-    "horaceqedew_FSR",
-    "horacelophotosmecoffew_FSR",
-)
-
-
-def _corr_hist_names(results, proc):
-    """Match histmaker output <base>_<generator>_Corr and classify by type."""
-    names = {"pdfas": None, "pdfvars": None, "central": None}
-    if proc not in results or "output" not in results[proc]:
-        return names
-    for name in results[proc]["output"]:
-        if not name.endswith("_Corr"):
-            continue
-        if any(tag in name for tag in EW_CORR_TAGS):
-            continue
-        if "pdfas" in name:
-            names["pdfas"] = name
-        elif "pdfvars" in name:
-            names["pdfvars"] = name
-        else:
-            names["central"] = name
-    return names
-
-
-def _get_hist(results, proc, name):
-    h_proxy = results[proc]["output"][name]
-    h = h_proxy.get() if hasattr(h_proxy, "get") else h_proxy
-    return _scale_mc(h, proc_scale[proc]) if proc in proc_scale else _crop_ptll(h)
-
-
-h_theory_corr_pdfas_dict = {}
-h_theory_corr_pdfvars_dict = {}
-h_theory_corr_central_dict = {}
-h_qcd_helicity_dict = {}
-h_ew_corr_dict = {}  # proc -> {generator: hist}
-
-for proc in signal_procs:
-    names = _corr_hist_names(results, proc)
-    if names["pdfas"]:
-        h_theory_corr_pdfas_dict[proc] = _get_hist(results, proc, names["pdfas"])
-        print_flush(f"{proc}: found alpha_s variation hist {names['pdfas']}")
-    else:
-        print_flush(f"Warning: no pdfas theory hist for {proc}")
-    if names["pdfvars"]:
-        h_theory_corr_pdfvars_dict[proc] = _get_hist(results, proc, names["pdfvars"])
-        print_flush(f"{proc}: found PDF variation hist {names['pdfvars']}")
-    else:
-        print_flush(f"Warning: no pdfvars theory hist for {proc}")
-    if names["central"]:
-        h_theory_corr_central_dict[proc] = _get_hist(results, proc, names["central"])
-        print_flush(f"{proc}: found SCETlib theory variation hist {names['central']}")
-    for name in results[proc]["output"]:
-        if name.endswith("_qcdScaleByHelicity"):
-            h_qcd_helicity_dict[proc] = _get_hist(results, proc, name)
-            print_flush(f"{proc}: found qcdScaleByHelicity hist {name}")
-        for tag in EW_CORR_TAGS:
-            if name.endswith(f"{tag}_Corr"):
-                h_ew_corr_dict.setdefault(proc, {})[tag] = _get_hist(
-                    results, proc, name
-                )
-                print_flush(f"{proc}: found EW correction hist {name}")
-
-# EW hists from an auxiliary histmaker file (--ewHistsFile): apply the
-# per-bin EW/nominal weight ratios from that file to this file's nominal
-# templates, for productions that predate the EW wiring
-if args.ewHistsFile:
-    ew_results = base_io.load_results_h5py(
-        h5py.File(os.path.abspath(args.ewHistsFile), "r")
-    )
-    for proc in signal_procs:
-        if proc in h_ew_corr_dict:
-            continue  # main file already carries EW hists for this proc
-        if proc not in ew_results or "output" not in ew_results[proc]:
-            print_flush(f"Warning: {proc} not in --ewHistsFile, no EW systematics")
-            continue
-        ew_out = ew_results[proc]["output"]
-        if hist_name not in ew_out:
-            continue
-        h_nom_aux = ew_out[hist_name]
-        h_nom_aux = h_nom_aux.get() if hasattr(h_nom_aux, "get") else h_nom_aux
-        nom_aux_vals = h_nom_aux.values()
-        for name in ew_out:
-            for tag in EW_CORR_TAGS:
-                if not name.endswith(f"{tag}_Corr"):
-                    continue
-                h_aux = ew_out[name]
-                h_aux = h_aux.get() if hasattr(h_aux, "get") else h_aux
-                ratio = np.ones_like(h_aux.values())
-                np.divide(
-                    h_aux.values(),
-                    nom_aux_vals[..., None],
-                    out=ratio,
-                    where=nom_aux_vals[..., None] != 0,
-                )
-                h_ew = h_aux.copy()
-                new_vals = ratio * h_mc_dict[proc].values()[..., None]
-                view = h_ew.view(flow=False)
-                if view.dtype.fields:
-                    view["value"] = new_vals
-                    view["variance"] = 0.0
-                else:
-                    view[...] = new_vals
-                h_ew_corr_dict.setdefault(proc, {})[tag] = h_ew
-                print_flush(
-                    f"{proc}: EW hist {name} transferred from --ewHistsFile "
-                    f"via per-bin ratio"
-                )
-
-# muon momentum scale/resolution variations (scarekit bootstrap = stat,
-# window-variation spread = syst), filled by mz_5TeV.py --muonCorr scarekit
-# for all MC processes
-MUON_VAR_HISTS = [
-    "ptll_muonScaleUp",
-    "ptll_muonScaleDown",
-    "ptll_muonResUp",
-    "ptll_muonResDown",
-    "ptll_muonScaleSystUp",
-    "ptll_muonScaleSystDown",
-    "ptll_muonResSystUp",
-    "ptll_muonResSystDown",
-]
-h_muon_var_dict = {}
-for proc in mc_procs:
-    if proc not in results or "output" not in results[proc]:
-        continue
-    found = {
-        nm: _get_hist(results, proc, nm)
-        for nm in MUON_VAR_HISTS
-        if nm in results[proc]["output"]
-    }
-    if found:
-        h_muon_var_dict[proc] = found
-        print_flush(f"{proc}: found muon calibration variation hists {sorted(found)}")
-
-# Z boson mass variations (MiNNLO Breit-Wigner reweighting, MEParamWeight),
-# filled by mz_5TeV.py for Z MC; the +-2.1 MeV (PDG) entries give the mZ
-# uncertainty nuisance
-MASSWEIGHT_HIST = "ptll_massWeightZ"
-h_massweight_dict = {}
-for proc in mc_procs:
-    if (
-        proc in results
-        and "output" in results[proc]
-        and MASSWEIGHT_HIST in results[proc]["output"]
-    ):
-        h_massweight_dict[proc] = _get_hist(results, proc, MASSWEIGHT_HIST)
-        print_flush(f"{proc}: found Z mass variation hist {MASSWEIGHT_HIST}")
-
-# Z width and sin2theta variations (same MiNNLO reweighting machinery)
-WIDTHWEIGHT_HIST = "ptll_widthWeightZ"
-SIN2THETAWEIGHT_HIST = "ptll_sin2thetaWeightZ"
-h_widthweight_dict = {}
-h_sin2thetaweight_dict = {}
-for proc in mc_procs:
-    if proc not in results or "output" not in results[proc]:
-        continue
-    if WIDTHWEIGHT_HIST in results[proc]["output"]:
-        h_widthweight_dict[proc] = _get_hist(results, proc, WIDTHWEIGHT_HIST)
-        print_flush(f"{proc}: found Z width variation hist {WIDTHWEIGHT_HIST}")
-    if SIN2THETAWEIGHT_HIST in results[proc]["output"]:
-        h_sin2thetaweight_dict[proc] = _get_hist(results, proc, SIN2THETAWEIGHT_HIST)
-        print_flush(f"{proc}: found sin2theta variation hist {SIN2THETAWEIGHT_HIST}")
-
-# b,c quark mass variation hists (MSHT20 mbrange/mcrange LHE weights,
-# renormalized to the range set's own central in the histmaker)
-BCMASS_HISTS = {
-    "pdfMSHT20mbrange": "ptll_pdfMSHT20mbrange",
-    "pdfMSHT20mcrange": "ptll_pdfMSHT20mcrange",
-}
-h_bcmass_dicts = {key: {} for key in BCMASS_HISTS}
-for proc in mc_procs:
-    if proc not in results or "output" not in results[proc]:
-        continue
-    for key, hname in BCMASS_HISTS.items():
-        if hname in results[proc]["output"]:
-            h_bcmass_dicts[key][proc] = _get_hist(results, proc, hname)
-            print_flush(f"{proc}: found b,c quark mass variation hist {hname}")
-
-# Muon efficiency variation templates (mz_5TeV.py --muonScaleFactors), loaded
-# here because everything in `results` is a lazy H5PickleProxy and the file is
-# closed a few lines below. Keyed proc -> {hist name: hist}; the SF is applied to
-# every MC process, so every MC process has them.
-EFF_STAT_PREFIX = "ptll_effStatTnP_"  # "ptll" is the histmaker's base_name
-EFF_SYST_NAME = "ptll_effSystTnP"
-h_muon_eff_dict = {}
-for proc in mc_procs:
-    names = sorted(
-        k
-        for k in results[proc]["output"]
-        if k.startswith(EFF_STAT_PREFIX) or k == EFF_SYST_NAME
-    )
-    if names:
-        h_muon_eff_dict[proc] = {n: _get_hist(results, proc, n) for n in names}
-        print_flush(f"{proc}: found muon efficiency variation hists {names}")
-
-# pseudodata for bias tests: load the alternative-model histogram from the
-# (first) signal process before the file is closed
-h_pseudo_raw = None
-if args.pseudoData:
-    pseudo_proc = signal_procs[0] if signal_procs else mc_procs[0]
-    if args.pseudoData not in results[pseudo_proc]["output"]:
-        raise RuntimeError(
-            f"--pseudoData histogram {args.pseudoData} not found for process "
-            f"{pseudo_proc}; available: {sorted(results[pseudo_proc]['output'])}"
-        )
-    h_pseudo_raw = _get_hist(results, pseudo_proc, args.pseudoData)
-
-h5file.close()
-
-if h_mc_dict:
-    # Asimov data = sum of ALL MC processes (signal + backgrounds), so the
-    # stored data matches the model expectation exactly and fitting it
-    # directly (-t 0, e.g. for pseudodata bias tests) closes at zero
-    h_data = None
-    for p, hmc in h_mc_dict.items():
-        hn = hmc[{"vars": 0}] if "vars" in hmc.axes.name else hmc
-        h_data = hn.copy() if h_data is None else h_data + hn
-    print_flush(
-        f"Using sum of MC processes {list(h_mc_dict.keys())} as expected data (Asimov)"
-    )
-else:
-    raise RuntimeError("No MC processes found to use as data")
-
-# Handle vars axis if present
-axis_names = [ax.name for ax in h_data.axes] if hasattr(h_data, "axes") else []
-h_data_base = h_data[{"vars": 0}] if "vars" in axis_names else h_data
-h_mc_base = {
-    proc: (h[{"vars": 0}] if "vars" in h.axes.name else h)
-    for proc, h in h_mc_dict.items()
-}
-
-rebin_factors = {}
-for spec in args.rebin:
-    ax_name, sep, factor = spec.partition("=")
-    if not sep or not factor.isdigit():
-        raise ValueError(f"Invalid --rebin spec '{spec}', expected AXIS=N")
-    rebin_factors[ax_name] = int(factor)
-
-
-def _rebin(h):
-    for ax_name, factor in rebin_factors.items():
-        if ax_name in h.axes.name:
-            h = h[{ax_name: slice(None, None, hist.rebin(factor))}]
-    return h
-
-
-if rebin_factors:
-    h_data_base = _rebin(h_data_base)
-    h_mc_base = {proc: _rebin(h) for proc, h in h_mc_base.items()}
-    print_flush(f"Rebinned fit observable with {rebin_factors}")
-
-if h_pseudo_raw is not None:
-    hp = h_pseudo_raw
-    if args.pseudoDataEntry is not None:
-        if "vars" not in hp.axes.name:
-            raise RuntimeError(
-                f"--pseudoDataEntry given but {args.pseudoData} has no 'vars' axis"
-            )
-        hp = hp[{"vars": args.pseudoDataEntry}]
-    elif "vars" in hp.axes.name:
-        raise RuntimeError(
-            f"{args.pseudoData} has a 'vars' axis; select an entry with "
-            f"--pseudoDataEntry (available: {list(hp.axes['vars'])})"
-        )
-    hp = hp.project(*h_data_base.axes.name)
-    hp = _rebin(hp)
-    # replace only the signal component of the Asimov sum; the other
-    # processes stay at their nominal expectation
-    pseudo_vals = hp.values() + (h_data_base.values() - h_mc_base[pseudo_proc].values())
-    # keep the data histogram storage type (values are what matters;
-    # pseudodata is a smooth template, Poisson errors come from the fit)
-    h_pseudo = h_data_base.copy()
-    view = h_pseudo.view(flow=False)
-    if view.dtype.fields:
-        view["value"] = pseudo_vals
-        view["variance"] = pseudo_vals
-    else:
-        view[...] = pseudo_vals
-    h_data_base = h_pseudo
-    print_flush(
-        f"PSEUDODATA: Asimov data replaced by {args.pseudoData}"
-        + (f" [vars={args.pseudoDataEntry}]" if args.pseudoDataEntry else "")
-        + f" (yield {float(h_data_base.values().sum()):.1f})"
-    )
-
-
-def _hist_yield(h):
-    s = h.sum()
-    return s.value if hasattr(s, "value") else float(s)
-
-
-# Asimov: MC stays at its absolute lumi x xsec normalization, so the
-# luminosity uncertainty applies (see below). mc_scale is kept as a hook
-# used by the systematic templates.
-mc_scale = 1.0
-
 # Build tensor
 writer = tensorwriter.TensorWriter(
     sparse=args.sparse,
     systematic_type=args.systematicType,
 )
 
-channel_name = "ch0"
-writer.add_channel(h_data_base.axes, channel_name)
-writer.add_data(h_data_base, channel_name)
 
-background_procs = [p for p in mc_procs if p not in signal_procs]
+def process_channel(channel_name, base, hist_name, is_nominal_channel):
+    """Load one fit channel's templates and add them, with all their
+    systematics, to the tensor. base is the histmaker's histogram base name
+    for the channel (the nominal one keeps "ptll"); hist_name its nominal.
+    Every systematic is booked per channel, following PR #709."""
+    # Load MC histograms (xsec*lumi normalized)
+    h_mc_dict = {}
+    for proc in mc_procs:
+        if "output" in results[proc] and hist_name in results[proc]["output"]:
+            h_proxy = results[proc]["output"][hist_name]
+            h = h_proxy.get() if hasattr(h_proxy, "get") else h_proxy
+            h_mc_dict[proc] = _scale_mc(h, proc_scale[proc])
 
-# Add processes
-for proc in signal_procs:
-    if proc in h_mc_base:
-        writer.add_process(h_mc_base[proc], proc, channel_name, signal=False)
+    # Identify signal processes before closing file
+    signal_procs = [p for p in mc_procs if "Zmumu" in p or "Ztautau" in p]
 
-for proc in background_procs:
-    if proc in h_mc_base:
-        writer.add_process(h_mc_base[proc], proc, channel_name, signal=False)
+    # EW/FSR corrections (borrowed 13 TeV ratio files, filled by mz_5TeV.py)
+    EW_CORR_TAGS = (
+        "powhegFOEW",
+        "pythiaew_ISR",
+        "horaceqedew_FSR",
+        "horacelophotosmecoffew_FSR",
+    )
 
+    def _corr_hist_names(results, proc):
+        """Match histmaker output <base>_<generator>_Corr and classify by type."""
+        names = {"pdfas": None, "pdfvars": None, "central": None}
+        if proc not in results or "output" not in results[proc]:
+            return names
+        for name in results[proc]["output"]:
+            if not name.startswith(f"{base}_") or not name.endswith("_Corr"):
+                continue
+            if any(tag in name for tag in EW_CORR_TAGS):
+                continue
+            if "pdfas" in name:
+                names["pdfas"] = name
+            elif "pdfvars" in name:
+                names["pdfvars"] = name
+            else:
+                names["central"] = name
+        return names
 
-def _project_var(h_corr, var_name, proc_name):
-    names = list(h_mc_base[proc_name].axes.name)
-    h = h_corr[{"vars": var_name}].project(*names)
-    if args.factorizeSystAxes:
-        keep = [n for n in names if n not in args.factorizeSystAxes]
-        if keep != names[: len(keep)]:
-            raise RuntimeError(
-                "--factorizeSystAxes must be the trailing axes of the fit observable"
-            )
-        h_cen = h_corr[{"vars": 0}].project(*names)
-        num = h.project(*keep).values()
-        den = h_cen.project(*keep).values()
-        ratio = np.divide(num, den, out=np.ones_like(num), where=den > 0)
-        h_fact = h_cen.copy()
-        view = h_fact.view(flow=False)
-        scaled = h_cen.values() * ratio.reshape(
-            ratio.shape + (1,) * (len(names) - len(keep))
-        )
-        if view.dtype.fields:
-            view["value"] = scaled
+    def _get_hist(results, proc, name):
+        h_proxy = results[proc]["output"][name]
+        h = h_proxy.get() if hasattr(h_proxy, "get") else h_proxy
+        return _scale_mc(h, proc_scale[proc]) if proc in proc_scale else _crop_ptll(h)
+
+    h_theory_corr_pdfas_dict = {}
+    h_theory_corr_pdfvars_dict = {}
+    h_theory_corr_central_dict = {}
+    h_qcd_helicity_dict = {}
+    h_ew_corr_dict = {}  # proc -> {generator: hist}
+
+    for proc in signal_procs:
+        names = _corr_hist_names(results, proc)
+        if names["pdfas"]:
+            h_theory_corr_pdfas_dict[proc] = _get_hist(results, proc, names["pdfas"])
+            print_flush(f"{proc}: found alpha_s variation hist {names['pdfas']}")
         else:
-            view[...] = scaled
-        h = h_fact
-    return _rebin(h) * mc_scale
+            print_flush(f"Warning: no pdfas theory hist for {proc}")
+        if names["pdfvars"]:
+            h_theory_corr_pdfvars_dict[proc] = _get_hist(
+                results, proc, names["pdfvars"]
+            )
+            print_flush(f"{proc}: found PDF variation hist {names['pdfvars']}")
+        else:
+            print_flush(f"Warning: no pdfvars theory hist for {proc}")
+        if names["central"]:
+            h_theory_corr_central_dict[proc] = _get_hist(
+                results, proc, names["central"]
+            )
+            print_flush(
+                f"{proc}: found SCETlib theory variation hist {names['central']}"
+            )
+        for name in results[proc]["output"]:
+            if not name.startswith(f"{base}_"):
+                continue
+            if name.endswith("_qcdScaleByHelicity"):
+                h_qcd_helicity_dict[proc] = _get_hist(results, proc, name)
+                print_flush(f"{proc}: found qcdScaleByHelicity hist {name}")
+            for tag in EW_CORR_TAGS:
+                if name.endswith(f"{tag}_Corr"):
+                    h_ew_corr_dict.setdefault(proc, {})[tag] = _get_hist(
+                        results, proc, name
+                    )
+                    print_flush(f"{proc}: found EW correction hist {name}")
 
+    # EW hists from an auxiliary histmaker file (--ewHistsFile): apply the
+    # per-bin EW/nominal weight ratios from that file to this file's nominal
+    # templates, for productions that predate the EW wiring
+    if args.ewHistsFile:
+        ew_results = base_io.load_results_h5py(
+            h5py.File(os.path.abspath(args.ewHistsFile), "r")
+        )
+        for proc in signal_procs:
+            if proc in h_ew_corr_dict:
+                continue  # main file already carries EW hists for this proc
+            if proc not in ew_results or "output" not in ew_results[proc]:
+                print_flush(f"Warning: {proc} not in --ewHistsFile, no EW systematics")
+                continue
+            ew_out = ew_results[proc]["output"]
+            if hist_name not in ew_out:
+                continue
+            h_nom_aux = ew_out[hist_name]
+            h_nom_aux = h_nom_aux.get() if hasattr(h_nom_aux, "get") else h_nom_aux
+            nom_aux_vals = h_nom_aux.values()
+            for name in ew_out:
+                for tag in EW_CORR_TAGS:
+                    if not name.endswith(f"{tag}_Corr"):
+                        continue
+                    h_aux = ew_out[name]
+                    h_aux = h_aux.get() if hasattr(h_aux, "get") else h_aux
+                    ratio = np.ones_like(h_aux.values())
+                    np.divide(
+                        h_aux.values(),
+                        nom_aux_vals[..., None],
+                        out=ratio,
+                        where=nom_aux_vals[..., None] != 0,
+                    )
+                    h_ew = h_aux.copy()
+                    new_vals = ratio * h_mc_dict[proc].values()[..., None]
+                    view = h_ew.view(flow=False)
+                    if view.dtype.fields:
+                        view["value"] = new_vals
+                        view["variance"] = 0.0
+                    else:
+                        view[...] = new_vals
+                    h_ew_corr_dict.setdefault(proc, {})[tag] = h_ew
+                    print_flush(
+                        f"{proc}: EW hist {name} transferred from --ewHistsFile "
+                        f"via per-bin ratio"
+                    )
 
-# PDF variations from pdfvars correction histogram
-# (constrained, correlated across Z processes via common systematic names)
-# CT18Z hessian sets are published at 90% CL; scale to 68% (1/1.645)
-pdf_cl_scale = theory_utils.pdfMap["ct18z"]["scale"]
-for proc_name, h_corr in h_theory_corr_pdfvars_dict.items():
-    if "vars" not in h_corr.axes.name:
-        print_flush(f"Warning: pdfvars hist for {proc_name} has no vars axis")
-        continue
-    vars_axis = h_corr.axes["vars"]
-    # Exclude central and alpha_s variations (which have "_as_" in the name)
-    pdf_variations = [
-        str(v) for v in vars_axis if str(v) != "central" and "_as_" not in str(v)
+    # muon momentum scale/resolution variations (scarekit bootstrap = stat,
+    # window-variation spread = syst), filled by mz_5TeV.py --muonCorr scarekit
+    # for all MC processes
+    MUON_VAR_HISTS = [
+        f"{base}_muonScaleUp",
+        f"{base}_muonScaleDown",
+        f"{base}_muonResUp",
+        f"{base}_muonResDown",
+        f"{base}_muonScaleSystUp",
+        f"{base}_muonScaleSystDown",
+        f"{base}_muonResSystUp",
+        f"{base}_muonResSystDown",
     ]
-    num_pairs = 0
-    for var_name_up, var_name_down in zip(pdf_variations[1::2], pdf_variations[2::2]):
-        writer.add_systematic(
-            [
-                _project_var(h_corr, var_name_up, proc_name),
-                _project_var(h_corr, var_name_down, proc_name),
-            ],
-            f"{var_name_up}_{var_name_down}",
-            proc_name,
-            channel_name,
-            kfactor=pdf_cl_scale,
-            constrained=True,
-            symmetrize="quadratic",
-            groups=["pdfCT18Z"],
-        )
-        num_pairs += 1
-    print_flush(f"Added {num_pairs} PDF systematic pairs for process {proc_name}")
+    h_muon_var_dict = {}
+    for proc in mc_procs:
+        if proc not in results or "output" not in results[proc]:
+            continue
+        found = {
+            nm: _get_hist(results, proc, nm)
+            for nm in MUON_VAR_HISTS
+            if nm in results[proc]["output"]
+        }
+        if found:
+            h_muon_var_dict[proc] = found
+            print_flush(
+                f"{proc}: found muon calibration variation hists {sorted(found)}"
+            )
 
-# alpha_s variations from pdfas correction histogram (unconstrained, noi=True)
-for proc_name, h_corr in h_theory_corr_pdfas_dict.items():
-    if "vars" not in h_corr.axes.name:
-        print_flush(f"Warning: pdfas hist for {proc_name} has no vars axis")
-        continue
-    vars_axis = h_corr.axes["vars"]
-    var_name_0120 = "pdfCT18ZNNLO_as_0120"
-    var_name_0116 = "pdfCT18ZNNLO_as_0116"
-    if var_name_0120 in vars_axis and var_name_0116 in vars_axis:
-        writer.add_systematic(
-            [
-                _project_var(h_corr, var_name_0120, proc_name),
-                _project_var(h_corr, var_name_0116, proc_name),
-            ],
-            "pdfAlphaS",
-            proc_name,
-            channel_name,
-            constrained=False,
-            noi=True,  # Only alpha_s variations have noi=True
+    # Z boson mass variations (MiNNLO Breit-Wigner reweighting, MEParamWeight),
+    # filled by mz_5TeV.py for Z MC; the +-2.1 MeV (PDG) entries give the mZ
+    # uncertainty nuisance
+    MASSWEIGHT_HIST = f"{base}_massWeightZ"
+    h_massweight_dict = {}
+    for proc in mc_procs:
+        if (
+            proc in results
+            and "output" in results[proc]
+            and MASSWEIGHT_HIST in results[proc]["output"]
+        ):
+            h_massweight_dict[proc] = _get_hist(results, proc, MASSWEIGHT_HIST)
+            print_flush(f"{proc}: found Z mass variation hist {MASSWEIGHT_HIST}")
+
+    # Z width and sin2theta variations (same MiNNLO reweighting machinery)
+    WIDTHWEIGHT_HIST = f"{base}_widthWeightZ"
+    SIN2THETAWEIGHT_HIST = f"{base}_sin2thetaWeightZ"
+    h_widthweight_dict = {}
+    h_sin2thetaweight_dict = {}
+    for proc in mc_procs:
+        if proc not in results or "output" not in results[proc]:
+            continue
+        if WIDTHWEIGHT_HIST in results[proc]["output"]:
+            h_widthweight_dict[proc] = _get_hist(results, proc, WIDTHWEIGHT_HIST)
+            print_flush(f"{proc}: found Z width variation hist {WIDTHWEIGHT_HIST}")
+        if SIN2THETAWEIGHT_HIST in results[proc]["output"]:
+            h_sin2thetaweight_dict[proc] = _get_hist(
+                results, proc, SIN2THETAWEIGHT_HIST
+            )
+            print_flush(
+                f"{proc}: found sin2theta variation hist {SIN2THETAWEIGHT_HIST}"
+            )
+
+    # b,c quark mass variation hists (MSHT20 mbrange/mcrange LHE weights,
+    # renormalized to the range set's own central in the histmaker)
+    BCMASS_HISTS = {
+        "pdfMSHT20mbrange": f"{base}_pdfMSHT20mbrange",
+        "pdfMSHT20mcrange": f"{base}_pdfMSHT20mcrange",
+    }
+    h_bcmass_dicts = {key: {} for key in BCMASS_HISTS}
+    for proc in mc_procs:
+        if proc not in results or "output" not in results[proc]:
+            continue
+        for key, hname in BCMASS_HISTS.items():
+            if hname in results[proc]["output"]:
+                h_bcmass_dicts[key][proc] = _get_hist(results, proc, hname)
+                print_flush(f"{proc}: found b,c quark mass variation hist {hname}")
+
+    # Muon efficiency variation templates (mz_5TeV.py --muonScaleFactors), loaded
+    # here because everything in `results` is a lazy H5PickleProxy and the file is
+    # closed a few lines below. Keyed proc -> {hist name: hist}; the SF is applied to
+    # every MC process, so every MC process has them.
+    EFF_STAT_PREFIX = f"{base}_effStatTnP_"  # the histmaker's per-channel base_name
+    EFF_SYST_NAME = f"{base}_effSystTnP"
+    h_muon_eff_dict = {}
+    for proc in mc_procs:
+        names = sorted(
+            k
+            for k in results[proc]["output"]
+            if k.startswith(EFF_STAT_PREFIX) or k == EFF_SYST_NAME
         )
-        print_flush(f"Added pdfAlphaS systematic for process {proc_name} (noi=True)")
+        if names:
+            h_muon_eff_dict[proc] = {n: _get_hist(results, proc, n) for n in names}
+            print_flush(f"{proc}: found muon efficiency variation hists {names}")
+
+    # in-situ efficiency coefficient variations (mz_5TeV.py --insituEffMCFile),
+    # booked for every MC process in every channel
+    h_insitu_dict = {}
+    if args.muonInsituEfficiency:
+        for proc in mc_procs:
+            nm = f"{base}_muonInsituEff"
+            if nm in results[proc].get("output", {}):
+                h_insitu_dict[proc] = _get_hist(results, proc, nm)
+        if not h_insitu_dict:
+            raise RuntimeError(
+                f"--muonInsituEfficiency: no {base}_muonInsituEff histogram in the "
+                "input; run mz_5TeV.py with --insituEffMCFile"
+            )
+
+    # pseudodata for bias tests: load the alternative-model histogram from the
+    # (first) signal process before the file is closed
+    h_pseudo_raw = None
+    if args.pseudoData and is_nominal_channel:
+        pseudo_proc = signal_procs[0] if signal_procs else mc_procs[0]
+        if args.pseudoData not in results[pseudo_proc]["output"]:
+            raise RuntimeError(
+                f"--pseudoData histogram {args.pseudoData} not found for process "
+                f"{pseudo_proc}; available: {sorted(results[pseudo_proc]['output'])}"
+            )
+        h_pseudo_raw = _get_hist(results, pseudo_proc, args.pseudoData)
+
+    if h_mc_dict:
+        # Asimov data = sum of ALL MC processes (signal + backgrounds), so the
+        # stored data matches the model expectation exactly and fitting it
+        # directly (-t 0, e.g. for pseudodata bias tests) closes at zero
+        h_data = None
+        for p, hmc in h_mc_dict.items():
+            hn = hmc[{"vars": 0}] if "vars" in hmc.axes.name else hmc
+            h_data = hn.copy() if h_data is None else h_data + hn
+        print_flush(
+            f"Using sum of MC processes {list(h_mc_dict.keys())} as expected data (Asimov)"
+        )
     else:
-        print_flush(f"Warning: Could not find both alpha_s variations for {proc_name}")
+        raise RuntimeError("No MC processes found to use as data")
 
-# SCETlib+DYTurbo theory uncertainties from the central correction histogram,
-# following the canonical grouping of the main analysis
-# (wremnants/postprocessing/theory_variation_labels.py, as applied in
-# theory_fit_writer.py): correlated non-perturbative parameters, lattice
-# gamma NP eigenvariations, theory nuisance parameters (TNPs), and
-# transition/fixed-order scale variations. The remaining entries on the
-# vars axis (nested scale envelopes, muf/kappa components, alternative NP
-# ranges, single-parameter gamma variations) are deliberately not used:
-# the TNPs replace the resummation scale envelopes, the pt20 FO envelope
-# covers the muf/kappa components, and the gamma eigenvariations replace
-# the single-parameter lattice variations.
+    # Handle vars axis if present
+    axis_names = [ax.name for ax in h_data.axes] if hasattr(h_data, "axes") else []
+    h_data_base = h_data[{"vars": 0}] if "vars" in axis_names else h_data
+    h_mc_base = {
+        proc: (h[{"vars": 0}] if "vars" in h.axes.name else h)
+        for proc, h in h_mc_dict.items()
+    }
 
-# The 5 TeV SCETlib file names the delta_lambda2 variations by absolute
-# value (central 0.125 +- 0.02) instead of by the delta itself
-SCETLIB_VAR_ALTERNATES = {
-    "delta_lambda20.02": "delta_lambda20.145",
-    "delta_lambda2-0.02": "delta_lambda20.105",
-}
+    rebin_factors = {}
+    for spec in args.rebin:
+        ax_name, sep, factor = spec.partition("=")
+        if not sep or not factor.isdigit():
+            raise ValueError(f"Invalid --rebin spec '{spec}', expected AXIS=N")
+        rebin_factors[ax_name] = int(factor)
 
+    def _rebin(h):
+        for ax_name, factor in rebin_factors.items():
+            if ax_name in h.axes.name:
+                h = h[{ax_name: slice(None, None, hist.rebin(factor))}]
+        return h
 
-def _canonical_scetlib_uncertainties():
-    uncs = []  # (var_up, var_down, name, symmetrize, groups)
-    # With the SCETlib-NP param model (--scetlibNPParamModel) the fit computes
-    # the lambda variations on the fly, so the fixed-variation resumNonpert
-    # nuisances must be dropped to avoid double counting; the TNPs and
-    # transition/FO scales are perturbative and stay either way.
-    if not args.scetlibNPParamModel:
-        for up, down, name in LATTICE_CORRELATED_NP_UNCERTAINTIES:
+    if rebin_factors:
+        h_data_base = _rebin(h_data_base)
+        h_mc_base = {proc: _rebin(h) for proc, h in h_mc_base.items()}
+        print_flush(f"Rebinned fit observable with {rebin_factors}")
+
+    if h_pseudo_raw is not None:
+        hp = h_pseudo_raw
+        if args.pseudoDataEntry is not None:
+            if "vars" not in hp.axes.name:
+                raise RuntimeError(
+                    f"--pseudoDataEntry given but {args.pseudoData} has no 'vars' axis"
+                )
+            hp = hp[{"vars": args.pseudoDataEntry}]
+        elif "vars" in hp.axes.name:
+            raise RuntimeError(
+                f"{args.pseudoData} has a 'vars' axis; select an entry with "
+                f"--pseudoDataEntry (available: {list(hp.axes['vars'])})"
+            )
+        hp = hp.project(*h_data_base.axes.name)
+        hp = _rebin(hp)
+        # replace only the signal component of the Asimov sum; the other
+        # processes stay at their nominal expectation
+        pseudo_vals = hp.values() + (
+            h_data_base.values() - h_mc_base[pseudo_proc].values()
+        )
+        # keep the data histogram storage type (values are what matters;
+        # pseudodata is a smooth template, Poisson errors come from the fit)
+        h_pseudo = h_data_base.copy()
+        view = h_pseudo.view(flow=False)
+        if view.dtype.fields:
+            view["value"] = pseudo_vals
+            view["variance"] = pseudo_vals
+        else:
+            view[...] = pseudo_vals
+        h_data_base = h_pseudo
+        print_flush(
+            f"PSEUDODATA: Asimov data replaced by {args.pseudoData}"
+            + (f" [vars={args.pseudoDataEntry}]" if args.pseudoDataEntry else "")
+            + f" (yield {float(h_data_base.values().sum()):.1f})"
+        )
+
+    def _hist_yield(h):
+        s = h.sum()
+        return s.value if hasattr(s, "value") else float(s)
+
+    # Asimov: MC stays at its absolute lumi x xsec normalization, so the
+    # luminosity uncertainty applies (see below). mc_scale is kept as a hook
+    # used by the systematic templates.
+    mc_scale = 1.0
+
+    writer.add_channel(h_data_base.axes, channel_name)
+    writer.add_data(h_data_base, channel_name)
+
+    background_procs = [p for p in mc_procs if p not in signal_procs]
+
+    # Add processes
+    for proc in signal_procs:
+        if proc in h_mc_base:
+            writer.add_process(h_mc_base[proc], proc, channel_name, signal=False)
+
+    for proc in background_procs:
+        if proc in h_mc_base:
+            writer.add_process(h_mc_base[proc], proc, channel_name, signal=False)
+
+    def _project_var(h_corr, var_name, proc_name):
+        names = list(h_mc_base[proc_name].axes.name)
+        h = h_corr[{"vars": var_name}].project(*names)
+        if args.factorizeSystAxes:
+            keep = [n for n in names if n not in args.factorizeSystAxes]
+            if keep != names[: len(keep)]:
+                raise RuntimeError(
+                    "--factorizeSystAxes must be the trailing axes of the fit observable"
+                )
+            h_cen = h_corr[{"vars": 0}].project(*names)
+            num = h.project(*keep).values()
+            den = h_cen.project(*keep).values()
+            ratio = np.divide(num, den, out=np.ones_like(num), where=den > 0)
+            h_fact = h_cen.copy()
+            view = h_fact.view(flow=False)
+            scaled = h_cen.values() * ratio.reshape(
+                ratio.shape + (1,) * (len(names) - len(keep))
+            )
+            if view.dtype.fields:
+                view["value"] = scaled
+            else:
+                view[...] = scaled
+            h = h_fact
+        return _rebin(h) * mc_scale
+
+    # PDF variations from pdfvars correction histogram
+    # (constrained, correlated across Z processes via common systematic names)
+    # CT18Z hessian sets are published at 90% CL; scale to 68% (1/1.645)
+    pdf_cl_scale = theory_utils.pdfMap["ct18z"]["scale"]
+    for proc_name, h_corr in h_theory_corr_pdfvars_dict.items():
+        if "vars" not in h_corr.axes.name:
+            print_flush(f"Warning: pdfvars hist for {proc_name} has no vars axis")
+            continue
+        vars_axis = h_corr.axes["vars"]
+        # Exclude central and alpha_s variations (which have "_as_" in the name)
+        pdf_variations = [
+            str(v) for v in vars_axis if str(v) != "central" and "_as_" not in str(v)
+        ]
+        num_pairs = 0
+        for var_name_up, var_name_down in zip(
+            pdf_variations[1::2], pdf_variations[2::2]
+        ):
+            writer.add_systematic(
+                [
+                    _project_var(h_corr, var_name_up, proc_name),
+                    _project_var(h_corr, var_name_down, proc_name),
+                ],
+                f"{var_name_up}_{var_name_down}",
+                proc_name,
+                channel_name,
+                kfactor=pdf_cl_scale,
+                constrained=True,
+                symmetrize="quadratic",
+                groups=["pdfCT18Z"],
+            )
+            num_pairs += 1
+        print_flush(f"Added {num_pairs} PDF systematic pairs for process {proc_name}")
+
+    # alpha_s variations from pdfas correction histogram (unconstrained, noi=True)
+    for proc_name, h_corr in h_theory_corr_pdfas_dict.items():
+        if "vars" not in h_corr.axes.name:
+            print_flush(f"Warning: pdfas hist for {proc_name} has no vars axis")
+            continue
+        vars_axis = h_corr.axes["vars"]
+        var_name_0120 = "pdfCT18ZNNLO_as_0120"
+        var_name_0116 = "pdfCT18ZNNLO_as_0116"
+        if var_name_0120 in vars_axis and var_name_0116 in vars_axis:
+            writer.add_systematic(
+                [
+                    _project_var(h_corr, var_name_0120, proc_name),
+                    _project_var(h_corr, var_name_0116, proc_name),
+                ],
+                "pdfAlphaS",
+                proc_name,
+                channel_name,
+                constrained=False,
+                noi=True,  # Only alpha_s variations have noi=True
+            )
+            print_flush(
+                f"Added pdfAlphaS systematic for process {proc_name} (noi=True)"
+            )
+        else:
+            print_flush(
+                f"Warning: Could not find both alpha_s variations for {proc_name}"
+            )
+
+    # SCETlib+DYTurbo theory uncertainties from the central correction histogram,
+    # following the canonical grouping of the main analysis
+    # (wremnants/postprocessing/theory_variation_labels.py, as applied in
+    # theory_fit_writer.py): correlated non-perturbative parameters, lattice
+    # gamma NP eigenvariations, theory nuisance parameters (TNPs), and
+    # transition/fixed-order scale variations. The remaining entries on the
+    # vars axis (nested scale envelopes, muf/kappa components, alternative NP
+    # ranges, single-parameter gamma variations) are deliberately not used:
+    # the TNPs replace the resummation scale envelopes, the pt20 FO envelope
+    # covers the muf/kappa components, and the gamma eigenvariations replace
+    # the single-parameter lattice variations.
+
+    # The 5 TeV SCETlib file names the delta_lambda2 variations by absolute
+    # value (central 0.125 +- 0.02) instead of by the delta itself
+    SCETLIB_VAR_ALTERNATES = {
+        "delta_lambda20.02": "delta_lambda20.145",
+        "delta_lambda2-0.02": "delta_lambda20.105",
+    }
+
+    def _canonical_scetlib_uncertainties():
+        uncs = []  # (var_up, var_down, name, symmetrize, groups)
+        # With the SCETlib-NP param model (--scetlibNPParamModel) the fit computes
+        # the lambda variations on the fly, so the fixed-variation resumNonpert
+        # nuisances must be dropped to avoid double counting; the TNPs and
+        # transition/FO scales are perturbative and stay either way.
+        if not args.scetlibNPParamModel:
+            for up, down, name in LATTICE_CORRELATED_NP_UNCERTAINTIES:
+                uncs.append(
+                    (
+                        up,
+                        down,
+                        name.replace("chargeVgenNP0", ""),
+                        "average",
+                        ["resumNonpert", "theory"],
+                    )
+                )
+            for up, down, name in LATTICE_GAMMA_NP_UNCERTAINTIES:
+                uncs.append((up, down, name, "average", ["resumNonpert", "theory"]))
+        for up, down in TNP_UNCERTAINTIES:
             uncs.append(
                 (
                     up,
                     down,
-                    name.replace("chargeVgenNP0", ""),
+                    f"resumTNP_{down.split('-')[0]}",
                     "average",
-                    ["resumNonpert", "theory"],
+                    ["resumTNP", "theory"],
                 )
             )
-        for up, down, name in LATTICE_GAMMA_NP_UNCERTAINTIES:
-            uncs.append((up, down, name, "average", ["resumNonpert", "theory"]))
-    for up, down in TNP_UNCERTAINTIES:
-        uncs.append(
-            (
-                up,
-                down,
-                f"resumTNP_{down.split('-')[0]}",
-                "average",
-                ["resumTNP", "theory"],
+        for up, down, name in TRANSITION_FO_UNCERTAINTIES:
+            uncs.append(
+                (up, down, name, "quadratic", ["resumTransitionFOScale", "theory"])
             )
-        )
-    for up, down, name in TRANSITION_FO_UNCERTAINTIES:
-        uncs.append((up, down, name, "quadratic", ["resumTransitionFOScale", "theory"]))
-    return uncs
+        return uncs
 
-
-for proc_name, h_corr in h_theory_corr_central_dict.items():
-    if "vars" not in h_corr.axes.name:
-        print_flush(f"Warning: central corr hist for {proc_name} has no vars axis")
-        continue
-    var_names = [str(v) for v in h_corr.axes["vars"]]
-    used_vars = {"pdf0", "central"}
-    n_added = 0
-    for (
-        var_up,
-        var_down,
-        syst_name,
-        symmetrize,
-        groups,
-    ) in _canonical_scetlib_uncertainties():
-        var_up = var_up if var_up in var_names else SCETLIB_VAR_ALTERNATES.get(var_up)
-        var_down = (
-            var_down if var_down in var_names else SCETLIB_VAR_ALTERNATES.get(var_down)
-        )
-        if var_up not in var_names or var_down not in var_names:
-            print_flush(
-                f"Warning: skipping {syst_name} for {proc_name}, "
-                f"variations {var_up}/{var_down} not found"
-            )
+    for proc_name, h_corr in h_theory_corr_central_dict.items():
+        if "vars" not in h_corr.axes.name:
+            print_flush(f"Warning: central corr hist for {proc_name} has no vars axis")
             continue
-        writer.add_systematic(
-            [
-                _project_var(h_corr, var_up, proc_name),
-                _project_var(h_corr, var_down, proc_name),
-            ],
+        var_names = [str(v) for v in h_corr.axes["vars"]]
+        used_vars = {"pdf0", "central"}
+        n_added = 0
+        for (
+            var_up,
+            var_down,
             syst_name,
-            proc_name,
-            channel_name,
-            constrained=True,
-            symmetrize=symmetrize,
-            groups=groups,
-        )
-        used_vars.update((var_up, var_down))
-        n_added += 1
-    unused = [v for v in var_names if v not in used_vars]
-    print_flush(
-        f"Added {n_added} SCETlib theory systematics for process {proc_name} "
-        f"({len(unused)} axis entries deliberately unused: {unused})"
-    )
-
-# Helicity-decomposed QCD scale uncertainties (angular coefficients): one
-# nuisance per helicity cross section, spanning the muR/muF envelope of that
-# helicity, reweighted through the angular decomposition (MiNNLO), following
-# the 13 TeV conventions (rabbit_theory_helper.add_minnlo_scale_uncertainty):
-# - sigma_UL (helicity -1) skipped: covered by the SCETlib TNP/transition/FO
-#   groups (helicities_to_exclude=[-1] at 13 TeV whenever SCETlib is used)
-# - per helicity, one set of nuisances decorrelated in coarse ptVgen bins
-#   plus one inclusive nuisance scaled by sqrt((n-1)/n) against double counting
-# - quadratic symmetrization
-# - pythia_shower_kt as a separate mirrored nuisance (pre-FSR vs LHE moments)
-for proc_name, h_hel in h_qcd_helicity_dict.items():
-    if "vars" not in h_hel.axes.name:
-        print_flush(
-            f"Warning: qcdScaleByHelicity hist for {proc_name} has no vars axis"
-        )
-        continue
-    var_names_hel = [str(v) for v in h_hel.axes["vars"]]
-    has_ptv = "ptVgen" in h_hel.axes.name
-    if has_ptv:
-        ptv_edges = h_hel.axes["ptVgen"].edges
-        n_ptv = len(ptv_edges) - 1
-        kfactor_incl = np.sqrt((n_ptv - 1) / n_ptv)
-        h_nom_slices = {
-            k: h_hel[{"vars": "nominal", "ptVgen": slice(k, k + 1, hist.sum)}]
-            for k in range(n_ptv)
-        }
-        h_nom_total = h_hel[{"vars": "nominal"}].project(
-            *h_mc_base[proc_name].axes.name
-        )
-    else:
-        kfactor_incl = 1.0
-    n_added = 0
-    for ihel in range(0, 8):
-        var_up = f"helicity_{ihel}_Up"
-        var_down = f"helicity_{ihel}_Down"
-        if var_up not in var_names_hel or var_down not in var_names_hel:
-            continue
-        # inclusive-in-ptV nuisance (correlated part)
-        writer.add_systematic(
-            [
-                _project_var(h_hel, var_up, proc_name),
-                _project_var(h_hel, var_down, proc_name),
-            ],
-            f"qcdScaleHelicity{ihel}Inclusive",
-            proc_name,
-            channel_name,
-            kfactor=kfactor_incl,
-            constrained=True,
-            symmetrize="quadratic",
-            groups=["angularCoeffs", f"angularCoeffs_A{ihel}", "theory"],
-        )
-        n_added += 1
-        if not has_ptv:
-            continue
-        # nuisances decorrelated in coarse ptVgen bins: vary only the
-        # contribution of one ptV slice, keep the rest at nominal
-        for k in range(n_ptv):
-            fit_axes = h_mc_base[proc_name].axes.name
-            h_var_k = {
-                var: (
-                    h_nom_total
-                    - h_nom_slices[k].project(*fit_axes)
-                    + h_hel[{"vars": var, "ptVgen": slice(k, k + 1, hist.sum)}].project(
-                        *fit_axes
-                    )
+            symmetrize,
+            groups,
+        ) in _canonical_scetlib_uncertainties():
+            var_up = (
+                var_up if var_up in var_names else SCETLIB_VAR_ALTERNATES.get(var_up)
+            )
+            var_down = (
+                var_down
+                if var_down in var_names
+                else SCETLIB_VAR_ALTERNATES.get(var_down)
+            )
+            if var_up not in var_names or var_down not in var_names:
+                print_flush(
+                    f"Warning: skipping {syst_name} for {proc_name}, "
+                    f"variations {var_up}/{var_down} not found"
                 )
-                for var in (var_up, var_down)
-            }
+                continue
             writer.add_systematic(
                 [
-                    _rebin(h_var_k[var_up]) * mc_scale,
-                    _rebin(h_var_k[var_down]) * mc_scale,
+                    _project_var(h_corr, var_up, proc_name),
+                    _project_var(h_corr, var_down, proc_name),
                 ],
-                f"qcdScaleHelicity{ihel}PtV{int(ptv_edges[k])}to{int(ptv_edges[k + 1])}",
+                syst_name,
                 proc_name,
                 channel_name,
+                constrained=True,
+                symmetrize=symmetrize,
+                groups=groups,
+            )
+            used_vars.update((var_up, var_down))
+            n_added += 1
+        unused = [v for v in var_names if v not in used_vars]
+        print_flush(
+            f"Added {n_added} SCETlib theory systematics for process {proc_name} "
+            f"({len(unused)} axis entries deliberately unused: {unused})"
+        )
+
+    # Helicity-decomposed QCD scale uncertainties (angular coefficients): one
+    # nuisance per helicity cross section, spanning the muR/muF envelope of that
+    # helicity, reweighted through the angular decomposition (MiNNLO), following
+    # the 13 TeV conventions (rabbit_theory_helper.add_minnlo_scale_uncertainty):
+    # - sigma_UL (helicity -1) skipped: covered by the SCETlib TNP/transition/FO
+    #   groups (helicities_to_exclude=[-1] at 13 TeV whenever SCETlib is used)
+    # - per helicity, one set of nuisances decorrelated in coarse ptVgen bins
+    #   plus one inclusive nuisance scaled by sqrt((n-1)/n) against double counting
+    # - quadratic symmetrization
+    # - pythia_shower_kt as a separate mirrored nuisance (pre-FSR vs LHE moments)
+    for proc_name, h_hel in h_qcd_helicity_dict.items():
+        if "vars" not in h_hel.axes.name:
+            print_flush(
+                f"Warning: qcdScaleByHelicity hist for {proc_name} has no vars axis"
+            )
+            continue
+        var_names_hel = [str(v) for v in h_hel.axes["vars"]]
+        has_ptv = "ptVgen" in h_hel.axes.name
+        if has_ptv:
+            ptv_edges = h_hel.axes["ptVgen"].edges
+            n_ptv = len(ptv_edges) - 1
+            kfactor_incl = np.sqrt((n_ptv - 1) / n_ptv)
+            h_nom_slices = {
+                k: h_hel[{"vars": "nominal", "ptVgen": slice(k, k + 1, hist.sum)}]
+                for k in range(n_ptv)
+            }
+            h_nom_total = h_hel[{"vars": "nominal"}].project(
+                *h_mc_base[proc_name].axes.name
+            )
+        else:
+            kfactor_incl = 1.0
+        n_added = 0
+        for ihel in range(0, 8):
+            var_up = f"helicity_{ihel}_Up"
+            var_down = f"helicity_{ihel}_Down"
+            if var_up not in var_names_hel or var_down not in var_names_hel:
+                continue
+            # inclusive-in-ptV nuisance (correlated part)
+            writer.add_systematic(
+                [
+                    _project_var(h_hel, var_up, proc_name),
+                    _project_var(h_hel, var_down, proc_name),
+                ],
+                f"qcdScaleHelicity{ihel}Inclusive",
+                proc_name,
+                channel_name,
+                kfactor=kfactor_incl,
                 constrained=True,
                 symmetrize="quadratic",
                 groups=["angularCoeffs", f"angularCoeffs_A{ihel}", "theory"],
             )
             n_added += 1
-    # parton-shower/recoil uncertainty on the coefficients (one-sided, mirrored)
-    if "pythia_shower_kt" in var_names_hel:
-        h_shower = _project_var(h_hel, "pythia_shower_kt", proc_name)
-        h_shower_nom = _project_var(h_hel, "nominal", proc_name)
-        if np.allclose(h_shower.values(), h_shower_nom.values()):
-            print_flush(
-                f"pythia_shower_kt is identical to nominal for {proc_name}, skipping"
-            )
-        else:
-            writer.add_systematic(
-                h_shower,
-                "helicity_shower_kt",
-                proc_name,
-                channel_name,
-                mirror=True,
-                constrained=True,
-                groups=["angularCoeffs", "theory"],
-            )
-            n_added += 1
-    print_flush(
-        f"Added {n_added} helicity-decomposed QCD scale systematics for {proc_name}"
-    )
-
-# Muon momentum scale/resolution uncertainties (scarekit): stat from the
-# bootstrap spread, syst from the fit-window-variation spreads (syst3 for
-# scale, syst4 for resolution). Kinematic up/down variations of the
-# templates, correlated across MC processes via the shared systematic names
-for proc_name, hvars in h_muon_var_dict.items():
-    if proc_name not in h_mc_base:
-        continue
-    # Finer scale/resolution groups are nested alongside the muonCalibration
-    # umbrella, as at 13 TeV (setupRabbit.py groups=["scaleCrctn"/"resolutionCrctn",
-    # "muonCalibration", ...]). For the scale we use "muonScale" rather than the
-    # 13 TeV-internal "scaleCrctn" because only muonScale/nonClosure carry the
-    # "Muon scale" impact label in styles.py; resolutionCrctn is labeled there.
-    for syst_name, (up_name, dn_name, fine_group) in {
-        "muonScaleStat": ("ptll_muonScaleUp", "ptll_muonScaleDown", "muonScale"),
-        "muonResStat": ("ptll_muonResUp", "ptll_muonResDown", "resolutionCrctn"),
-        "muonScaleSyst": (
-            "ptll_muonScaleSystUp",
-            "ptll_muonScaleSystDown",
-            "muonScale",
-        ),
-        "muonResSyst": (
-            "ptll_muonResSystUp",
-            "ptll_muonResSystDown",
-            "resolutionCrctn",
-        ),
-    }.items():
-        if up_name not in hvars or dn_name not in hvars:
-            continue
-        fit_axes = h_mc_base[proc_name].axes.name
-        h_up = _rebin(hvars[up_name].project(*fit_axes)) * mc_scale
-        h_down = _rebin(hvars[dn_name].project(*fit_axes)) * mc_scale
-        if np.allclose(h_up.values(), h_down.values()):
-            print_flush(
-                f"{syst_name} up and down are identical for {proc_name} "
-                "(uncertainty inputs missing or zero?), skipping"
-            )
-            continue
-        writer.add_systematic(
-            [h_up, h_down],
-            syst_name,
-            proc_name,
-            channel_name,
-            constrained=True,
-            symmetrize="average",
-            groups=[fine_group, "muonCalibration", "experiment"],
+            if not has_ptv:
+                continue
+            # nuisances decorrelated in coarse ptVgen bins: vary only the
+            # contribution of one ptV slice, keep the rest at nominal
+            for k in range(n_ptv):
+                fit_axes = h_mc_base[proc_name].axes.name
+                h_var_k = {
+                    var: (
+                        h_nom_total
+                        - h_nom_slices[k].project(*fit_axes)
+                        + h_hel[
+                            {"vars": var, "ptVgen": slice(k, k + 1, hist.sum)}
+                        ].project(*fit_axes)
+                    )
+                    for var in (var_up, var_down)
+                }
+                writer.add_systematic(
+                    [
+                        _rebin(h_var_k[var_up]) * mc_scale,
+                        _rebin(h_var_k[var_down]) * mc_scale,
+                    ],
+                    f"qcdScaleHelicity{ihel}PtV{int(ptv_edges[k])}to{int(ptv_edges[k + 1])}",
+                    proc_name,
+                    channel_name,
+                    constrained=True,
+                    symmetrize="quadratic",
+                    groups=["angularCoeffs", f"angularCoeffs_A{ihel}", "theory"],
+                )
+                n_added += 1
+        # parton-shower/recoil uncertainty on the coefficients (one-sided, mirrored)
+        if "pythia_shower_kt" in var_names_hel:
+            h_shower = _project_var(h_hel, "pythia_shower_kt", proc_name)
+            h_shower_nom = _project_var(h_hel, "nominal", proc_name)
+            if np.allclose(h_shower.values(), h_shower_nom.values()):
+                print_flush(
+                    f"pythia_shower_kt is identical to nominal for {proc_name}, skipping"
+                )
+            else:
+                writer.add_systematic(
+                    h_shower,
+                    "helicity_shower_kt",
+                    proc_name,
+                    channel_name,
+                    mirror=True,
+                    constrained=True,
+                    groups=["angularCoeffs", "theory"],
+                )
+                n_added += 1
+        print_flush(
+            f"Added {n_added} helicity-decomposed QCD scale systematics for {proc_name}"
         )
-        print_flush(f"Added {syst_name} systematic for process {proc_name}")
 
-# Muon efficiency scale factors, from mz_5TeV.py --muonScaleFactors:
-#   ptll_effStatTnP_<step>  one nuisance per (eta, pt, charge) bin of the SF map
-#   ptll_effSystTnP         one fully correlated nuisance per step
-#
-# Both are ONE-SIDED and mirrored. A stat variation is SF -> SF + sigma, a single
-# shift of a positive quantity, so there is no independent down template to read;
-# mirror=True is the same treatment the 13 TeV effStatTnP nuisances get.
-#
-# Cells of the SF map with no probes have SF 1 and zero variance, so their
-# variation is identically the nominal. They are dropped here rather than handed
-# to the fit: a nuisance whose up and down templates both equal the nominal is a
-# flat direction in the likelihood, not a small uncertainty. The histmaker warns
-# how many such cells the map has.
-#
-# Applied to every MC process, signal and background alike, because the SF
-# multiplies all of them; correlated across processes through the shared name.
-for proc_name in sorted(h_muon_eff_dict):
-    if proc_name not in h_mc_base:
-        continue
-    out = h_muon_eff_dict[proc_name]
-    fit_axes = h_mc_base[proc_name].axes.name
-    h_nom_vals = h_mc_base[proc_name].values()
-    n_stat = n_syst = n_flat = 0
-
-    for hist_name in sorted(k for k in out if k.startswith(EFF_STAT_PREFIX)):
-        step = hist_name[len(EFF_STAT_PREFIX) :]
-        h_stat = out[hist_name]
-        # The variation axes are the trailing ones appended by add_syst_hist. Two
-        # shapes occur and both must be handled:
-        #   (eta, pt, charge)  per-bin variations of a COUNTED map
-        #   (eigenMode,)       eigenvector variations of a FITTED map -- the
-        #                      per-muon trigger, whose per-bin efficiencies are
-        #                      strongly correlated, so independent per-bin
-        #                      nuisances would mis-model the uncertainty
-        # Any other non-fit axis (yll when the fit is 1D in ptll) is projected out.
-        var_axes = [a for a in h_stat.axes.name if a not in fit_axes]
-        if var_axes[-3:] == ["eta", "pt", "charge"]:
-            var_axes = ["eta", "pt", "charge"]
-
-            def label(idx):
-                return f"eta{idx[0]}_pt{idx[1]}_q{idx[2]}"
-
-        elif var_axes[-1:] == ["eigenMode"]:
-            var_axes = ["eigenMode"]
-
-            def label(idx):
-                return f"eig{idx[0]}"
-
-        elif var_axes[-2:] == ["effBinYll", "effBinPtll"]:
-            # the EVENT-level map: one nuisance per (yll, ptll) cell of the map.
-            # Named effBin* rather than yll/ptll because the tensor axes sit
-            # alongside the fit axes and hist forbids duplicate names.
-            var_axes = ["effBinYll", "effBinPtll"]
-
-            def label(idx):
-                return f"yll{idx[0]}_ptll{idx[1]}"
-
-        else:
-            print_flush(
-                f"{hist_name}: unrecognised variation axes {var_axes}, skipping"
-            )
+    # Muon momentum scale/resolution uncertainties (scarekit): stat from the
+    # bootstrap spread, syst from the fit-window-variation spreads (syst3 for
+    # scale, syst4 for resolution). Kinematic up/down variations of the
+    # templates, correlated across MC processes via the shared systematic names
+    for proc_name, hvars in h_muon_var_dict.items():
+        if proc_name not in h_mc_base:
             continue
-        h_stat = h_stat.project(*fit_axes, *var_axes)
-        sizes = [h_stat.axes[a].size for a in var_axes]
-        for idx in np.ndindex(*sizes):
-            sl = {a: int(i) for a, i in zip(var_axes, idx)}
-            h_var = _rebin(h_stat[sl].project(*fit_axes)) * mc_scale
-            # Prune by SIZE, not just by exact flatness. np.allclose's default
-            # 1e-5 relative tolerance keeps thousands of negligible-but-nonzero
-            # variations, and because the efficiency variations are almost pure
-            # NORMALISATION they are near-degenerate with each other and with the
-            # luminosity nuisance. Keeping them does not add information, it adds
-            # degenerate directions, which inflates the traditional impacts of
-            # whatever they are degenerate with (observed: luminosity halves
-            # while every theory row grows ~20-30%).
-            rel = np.max(np.abs(h_var.values() - h_nom_vals)
-                         / np.maximum(np.abs(h_nom_vals), 1e-12))
-            if rel < args.effPruneThreshold:
-                n_flat += 1
+        # Finer scale/resolution groups are nested alongside the muonCalibration
+        # umbrella, as at 13 TeV (setupRabbit.py groups=["scaleCrctn"/"resolutionCrctn",
+        # "muonCalibration", ...]). For the scale we use "muonScale" rather than the
+        # 13 TeV-internal "scaleCrctn" because only muonScale/nonClosure carry the
+        # "Muon scale" impact label in styles.py; resolutionCrctn is labeled there.
+        for syst_name, (up_name, dn_name, fine_group) in {
+            "muonScaleStat": (
+                f"{base}_muonScaleUp",
+                f"{base}_muonScaleDown",
+                "muonScale",
+            ),
+            "muonResStat": (
+                f"{base}_muonResUp",
+                f"{base}_muonResDown",
+                "resolutionCrctn",
+            ),
+            "muonScaleSyst": (
+                f"{base}_muonScaleSystUp",
+                f"{base}_muonScaleSystDown",
+                "muonScale",
+            ),
+            "muonResSyst": (
+                f"{base}_muonResSystUp",
+                f"{base}_muonResSystDown",
+                "resolutionCrctn",
+            ),
+        }.items():
+            if up_name not in hvars or dn_name not in hvars:
+                continue
+            fit_axes = h_mc_base[proc_name].axes.name
+            h_up = _rebin(hvars[up_name].project(*fit_axes)) * mc_scale
+            h_down = _rebin(hvars[dn_name].project(*fit_axes)) * mc_scale
+            if np.allclose(h_up.values(), h_down.values()):
+                print_flush(
+                    f"{syst_name} up and down are identical for {proc_name} "
+                    "(uncertainty inputs missing or zero?), skipping"
+                )
                 continue
             writer.add_systematic(
-                h_var,
-                f"effStatTnP_{step}_{label(idx)}",
+                [h_up, h_down],
+                syst_name,
                 proc_name,
                 channel_name,
-                mirror=True,
                 constrained=True,
-                groups=[
-                    # the trigger DATA/MC blocks share the 'trigger' fine group,
-                    # matching lowPU's muSF_HLT_DATA_stat / muSF_HLT_MC_stat
-                    f"muon_eff_stat_{step.split('_')[0]}",
-                    "muon_eff_stat",
-                    "muon_eff_all",
-                    "experiment",
-                ],
+                symmetrize="average",
+                groups=[fine_group, "muonCalibration", "experiment"],
             )
-            n_stat += 1
+            print_flush(f"Added {syst_name} systematic for process {proc_name}")
 
-    if EFF_SYST_NAME in out:
-        h_syst = out[EFF_SYST_NAME]
-        # the step axis is the LAST one, appended by add_syst_hist. It is an
-        # Integer axis whose NAME is the joined step names (see
-        # make_muon_efficiency_helpers_5TeV: a StrCategory cannot be used as a
-        # tensor axis because the python bindings give it an overflow bin).
-        step_axis = h_syst.axes.name[-1]
-        steps = step_axis.split("-")
-        if len(steps) != h_syst.axes[step_axis].size:
-            print_flush(
-                f"{EFF_SYST_NAME}: step axis '{step_axis}' names {len(steps)} steps"
-                f" but has {h_syst.axes[step_axis].size} bins, skipping"
-            )
-        else:
-            h_syst = h_syst.project(*fit_axes, step_axis)
-            for istep, step in enumerate(steps):
-                h_var = (
-                    _rebin(h_syst[{step_axis: istep}].project(*fit_axes)) * mc_scale
+    # Muon efficiency scale factors, from mz_5TeV.py --muonScaleFactors:
+    #   ptll_effStatTnP_<step>  one nuisance per (eta, pt, charge) bin of the SF map
+    #   ptll_effSystTnP         one fully correlated nuisance per step
+    #
+    # Both are ONE-SIDED and mirrored. A stat variation is SF -> SF + sigma, a single
+    # shift of a positive quantity, so there is no independent down template to read;
+    # mirror=True is the same treatment the 13 TeV effStatTnP nuisances get.
+    #
+    # Cells of the SF map with no probes have SF 1 and zero variance, so their
+    # variation is identically the nominal. They are dropped here rather than handed
+    # to the fit: a nuisance whose up and down templates both equal the nominal is a
+    # flat direction in the likelihood, not a small uncertainty. The histmaker warns
+    # how many such cells the map has.
+    #
+    # Applied to every MC process, signal and background alike, because the SF
+    # multiplies all of them; correlated across processes through the shared name.
+    for proc_name in sorted(h_muon_eff_dict):
+        if proc_name not in h_mc_base:
+            continue
+        out = h_muon_eff_dict[proc_name]
+        fit_axes = h_mc_base[proc_name].axes.name
+        h_nom_vals = h_mc_base[proc_name].values()
+        n_stat = n_syst = n_flat = 0
+
+        for hist_name in sorted(k for k in out if k.startswith(EFF_STAT_PREFIX)):
+            step = hist_name[len(EFF_STAT_PREFIX) :]
+            h_stat = out[hist_name]
+            # The variation axes are the trailing ones appended by add_syst_hist. Two
+            # shapes occur and both must be handled:
+            #   (eta, pt, charge)  per-bin variations of a COUNTED map
+            #   (eigenMode,)       eigenvector variations of a FITTED map -- the
+            #                      per-muon trigger, whose per-bin efficiencies are
+            #                      strongly correlated, so independent per-bin
+            #                      nuisances would mis-model the uncertainty
+            # Any other non-fit axis (yll when the fit is 1D in ptll) is projected out.
+            var_axes = [a for a in h_stat.axes.name if a not in fit_axes]
+            if var_axes[-3:] == ["eta", "pt", "charge"]:
+                var_axes = ["eta", "pt", "charge"]
+
+                def label(idx):
+                    return f"eta{idx[0]}_pt{idx[1]}_q{idx[2]}"
+
+            elif var_axes[-1:] == ["eigenMode"]:
+                var_axes = ["eigenMode"]
+
+                def label(idx):
+                    return f"eig{idx[0]}"
+
+            elif var_axes[-2:] == ["effBinYll", "effBinPtll"]:
+                # the EVENT-level map: one nuisance per (yll, ptll) cell of the map.
+                # Named effBin* rather than yll/ptll because the tensor axes sit
+                # alongside the fit axes and hist forbids duplicate names.
+                var_axes = ["effBinYll", "effBinPtll"]
+
+                def label(idx):
+                    return f"yll{idx[0]}_ptll{idx[1]}"
+
+            else:
+                print_flush(
+                    f"{hist_name}: unrecognised variation axes {var_axes}, skipping"
                 )
-                if np.allclose(h_var.values(), h_nom_vals):
-                    print_flush(
-                        f"effSystTnP_{step} is identical to nominal for {proc_name}"
-                        " (the SF map carries no alternative measurement?), skipping"
-                    )
+                continue
+            h_stat = h_stat.project(*fit_axes, *var_axes)
+            sizes = [h_stat.axes[a].size for a in var_axes]
+            for idx in np.ndindex(*sizes):
+                sl = {a: int(i) for a, i in zip(var_axes, idx)}
+                h_var = _rebin(h_stat[sl].project(*fit_axes)) * mc_scale
+                # Prune by SIZE, not just by exact flatness. np.allclose's default
+                # 1e-5 relative tolerance keeps thousands of negligible-but-nonzero
+                # variations, and because the efficiency variations are almost pure
+                # NORMALISATION they are near-degenerate with each other and with the
+                # luminosity nuisance. Keeping them does not add information, it adds
+                # degenerate directions, which inflates the traditional impacts of
+                # whatever they are degenerate with (observed: luminosity halves
+                # while every theory row grows ~20-30%).
+                rel = np.max(
+                    np.abs(h_var.values() - h_nom_vals)
+                    / np.maximum(np.abs(h_nom_vals), 1e-12)
+                )
+                if rel < args.effPruneThreshold:
+                    n_flat += 1
                     continue
                 writer.add_systematic(
                     h_var,
-                    f"effSystTnP_{step}",
+                    f"effStatTnP_{step}_{label(idx)}",
                     proc_name,
                     channel_name,
                     mirror=True,
                     constrained=True,
                     groups=[
-                        f"muon_eff_syst_{step}",
-                        "muon_eff_syst",
+                        # the trigger DATA/MC blocks share the 'trigger' fine group,
+                        # matching lowPU's muSF_HLT_DATA_stat / muSF_HLT_MC_stat
+                        f"muon_eff_stat_{step.split('_')[0]}",
+                        "muon_eff_stat",
                         "muon_eff_all",
                         "experiment",
                     ],
                 )
-                n_syst += 1
+                n_stat += 1
 
-    if n_stat or n_syst or n_flat:
-        print_flush(
-            f"{proc_name}: added {n_stat} effStatTnP and {n_syst} effSystTnP"
-            f" systematics ({n_flat} empty map cells dropped)"
-        )
+        if EFF_SYST_NAME in out:
+            h_syst = out[EFF_SYST_NAME]
+            # the step axis is the LAST one, appended by add_syst_hist. It is an
+            # Integer axis whose NAME is the joined step names (see
+            # make_muon_efficiency_helpers_5TeV: a StrCategory cannot be used as a
+            # tensor axis because the python bindings give it an overflow bin).
+            step_axis = h_syst.axes.name[-1]
+            steps = step_axis.split("-")
+            if len(steps) != h_syst.axes[step_axis].size:
+                print_flush(
+                    f"{EFF_SYST_NAME}: step axis '{step_axis}' names {len(steps)} steps"
+                    f" but has {h_syst.axes[step_axis].size} bins, skipping"
+                )
+            else:
+                h_syst = h_syst.project(*fit_axes, step_axis)
+                for istep, step in enumerate(steps):
+                    h_var = (
+                        _rebin(h_syst[{step_axis: istep}].project(*fit_axes)) * mc_scale
+                    )
+                    if np.allclose(h_var.values(), h_nom_vals):
+                        print_flush(
+                            f"effSystTnP_{step} is identical to nominal for {proc_name}"
+                            " (the SF map carries no alternative measurement?), skipping"
+                        )
+                        continue
+                    writer.add_systematic(
+                        h_var,
+                        f"effSystTnP_{step}",
+                        proc_name,
+                        channel_name,
+                        mirror=True,
+                        constrained=True,
+                        groups=[
+                            f"muon_eff_syst_{step}",
+                            "muon_eff_syst",
+                            "muon_eff_all",
+                            "experiment",
+                        ],
+                    )
+                    n_syst += 1
 
-# Z boson mass uncertainty: +-2.1 MeV (PDG) Breit-Wigner reweighting entries
-# of the massWeight tensor, correlated across Z MC processes
-for proc_name, h_mw in h_massweight_dict.items():
-    if proc_name not in h_mc_base:
-        continue
-    shift_labels = list(h_mw.axes["massShift"])
-    up_lab, dn_lab = "massShiftZ2p1MeVUp", "massShiftZ2p1MeVDown"
-    if up_lab not in shift_labels or dn_lab not in shift_labels:
-        print_flush(
-            f"{proc_name}: {up_lab}/{dn_lab} not found in {MASSWEIGHT_HIST} "
-            f"(axis has {shift_labels}), skipping"
-        )
-        continue
-    fit_axes = h_mc_base[proc_name].axes.name
-    h_up = _rebin(h_mw[{"massShift": up_lab}].project(*fit_axes)) * mc_scale
-    h_down = _rebin(h_mw[{"massShift": dn_lab}].project(*fit_axes)) * mc_scale
-    if np.allclose(h_up.values(), h_down.values()):
-        print_flush(
-            f"massShiftZ2p1MeV up and down are identical for {proc_name} "
-            "(weights missing in the sample?), skipping"
-        )
-        continue
-    writer.add_systematic(
-        [h_up, h_down],
-        "massShiftZ2p1MeV",
-        proc_name,
-        channel_name,
-        constrained=True,
-        symmetrize="average",
-        groups=["massShift", "theory"],
-    )
-    print_flush(f"Added massShiftZ2p1MeV systematic for process {proc_name}")
+        if n_stat or n_syst or n_flat:
+            print_flush(
+                f"{proc_name}: added {n_stat} effStatTnP and {n_syst} effSystTnP"
+                f" systematics ({n_flat} empty map cells dropped)"
+            )
 
-
-def _add_label_pair_syst(
-    h_var, axis_name, up_lab, dn_lab, syst_name, groups, symmetrize="average"
-):
-    """Add one constrained symmetrized nuisance from two labeled entries
-    of a variation histogram (shared pattern for width/sin2theta/bc masses)."""
-    for proc_name, h in h_var.items():
+    # Z boson mass uncertainty: +-2.1 MeV (PDG) Breit-Wigner reweighting entries
+    # of the massWeight tensor, correlated across Z MC processes
+    for proc_name, h_mw in h_massweight_dict.items():
         if proc_name not in h_mc_base:
             continue
-        labels = list(h.axes[axis_name])
-        if up_lab not in labels or dn_lab not in labels:
+        shift_labels = list(h_mw.axes["massShift"])
+        up_lab, dn_lab = "massShiftZ2p1MeVUp", "massShiftZ2p1MeVDown"
+        if up_lab not in shift_labels or dn_lab not in shift_labels:
             print_flush(
-                f"{proc_name}: {up_lab}/{dn_lab} not found on {axis_name} axis "
-                f"(has {labels}), skipping {syst_name}"
+                f"{proc_name}: {up_lab}/{dn_lab} not found in {MASSWEIGHT_HIST} "
+                f"(axis has {shift_labels}), skipping"
             )
             continue
         fit_axes = h_mc_base[proc_name].axes.name
-        h_up = _rebin(h[{axis_name: up_lab}].project(*fit_axes)) * mc_scale
-        h_down = _rebin(h[{axis_name: dn_lab}].project(*fit_axes)) * mc_scale
+        h_up = _rebin(h_mw[{"massShift": up_lab}].project(*fit_axes)) * mc_scale
+        h_down = _rebin(h_mw[{"massShift": dn_lab}].project(*fit_axes)) * mc_scale
         if np.allclose(h_up.values(), h_down.values()):
             print_flush(
-                f"{syst_name} up and down are identical for {proc_name}, skipping"
+                f"massShiftZ2p1MeV up and down are identical for {proc_name} "
+                "(weights missing in the sample?), skipping"
             )
             continue
         writer.add_systematic(
             [h_up, h_down],
-            syst_name,
+            "massShiftZ2p1MeV",
             proc_name,
             channel_name,
             constrained=True,
-            symmetrize=symmetrize,
-            groups=groups,
+            symmetrize="average",
+            groups=["massShift", "theory"],
         )
-        print_flush(f"Added {syst_name} systematic for process {proc_name}")
+        print_flush(f"Added massShiftZ2p1MeV systematic for process {proc_name}")
 
-
-# GammaZ width: EW-fit uncertainty +-0.8 MeV (entries 0/1 of the width weights,
-# widthZ2p49493GeV/widthZ2p49333GeV = 2.49413 +- 0.0008 GeV), matching the
-# 13 TeV alpha_s fit (setupRabbit.py: WidthZ0p8MeV, "Variation from EW fit").
-# The PDG +-2.3 MeV pair (entries 2/4) is deliberately not used, for consistency
-# with 13 TeV; switch to widthZ2p4975GeV/widthZ2p4929GeV to recover it.
-_add_label_pair_syst(
-    h_widthweight_dict,
-    "width",
-    "widthZ2p49493GeV",
-    "widthZ2p49333GeV",
-    "widthZ0p8MeV",
-    ["widthZ", "theory"],
-)
-
-# effective weak mixing angle: EW-fit uncertainty +-0.00003 (entries 0/2;
-# entry 1 is the central 0.23154)
-_add_label_pair_syst(
-    h_sin2thetaweight_dict,
-    "sin2theta",
-    "sin2thetaZ0p23157",
-    "sin2thetaZ0p23151",
-    "sin2thetaZ0p00003",
-    ["sin2thetaZ", "theory"],
-)
-
-# b,c quark masses: the extreme MSHT20 mbrange/mcrange members (pdf1 =
-# lowest mass, pdf6/pdf8 = highest; member 0 is the set's own central) as
-# one Down/Up nuisance each, following the 13 TeV add_quark_mass_vars
-# convention (BC_QUARK_MASS_VARIATIONS: mbrange pdf1/pdf6, mcrange
-# pdf1/pdf8) with the quadratic symmetrization used for PDF uncertainties.
-# No CL conversion: the MSHT20 range sets are not 90% CL eigenvectors.
-_add_label_pair_syst(
-    h_bcmass_dicts["pdfMSHT20mbrange"],
-    "pdfVar",
-    "pdf6",
-    "pdf1",
-    "pdfMSHT20mbrange",
-    ["bcQuarkMass", "theory"],
-    symmetrize="quadratic",
-)
-_add_label_pair_syst(
-    h_bcmass_dicts["pdfMSHT20mcrange"],
-    "pdfVar",
-    "pdf8",
-    "pdf1",
-    "pdfMSHT20mcrange",
-    ["bcQuarkMass", "theory"],
-    symmetrize="quadratic",
-)
-
-# EW uncertainties from the borrowed 13 TeV ratio files, following
-# rabbit_helpers.add_electroweak_uncertainty at 13 TeV:
-# - powhegFOEW weak_ps/weak_aem -> virtual EW scheme variations,
-#   weak_default -> virtual EW correction on/off (all mirrored)
-# - horace FSR / photos MEC-off FSR: systIdx 1, mirrored
-# - pythia ISR: systIdx 1, mirrored, kfactor 2
-for proc_name, ew_hists in h_ew_corr_dict.items():
-    n_added = 0
-    h_fo = ew_hists.get("powhegFOEW")
-    if h_fo is not None:
-        for entry, subgroup in (
-            ("weak_ps", "theory_ew_virtZ_scheme"),
-            ("weak_aem", "theory_ew_virtZ_scheme"),
-            ("weak_default", "theory_ew_virtZ_corr"),
-        ):
+    def _add_label_pair_syst(
+        h_var, axis_name, up_lab, dn_lab, syst_name, groups, symmetrize="average"
+    ):
+        """Add one constrained symmetrized nuisance from two labeled entries
+        of a variation histogram (shared pattern for width/sin2theta/bc masses)."""
+        for proc_name, h in h_var.items():
+            if proc_name not in h_mc_base:
+                continue
+            labels = list(h.axes[axis_name])
+            if up_lab not in labels or dn_lab not in labels:
+                print_flush(
+                    f"{proc_name}: {up_lab}/{dn_lab} not found on {axis_name} axis "
+                    f"(has {labels}), skipping {syst_name}"
+                )
+                continue
+            fit_axes = h_mc_base[proc_name].axes.name
+            h_up = _rebin(h[{axis_name: up_lab}].project(*fit_axes)) * mc_scale
+            h_down = _rebin(h[{axis_name: dn_lab}].project(*fit_axes)) * mc_scale
+            if np.allclose(h_up.values(), h_down.values()):
+                print_flush(
+                    f"{syst_name} up and down are identical for {proc_name}, skipping"
+                )
+                continue
             writer.add_systematic(
-                _rebin(h_fo[{"weak": entry}]) * mc_scale,
-                f"powhegFOEW_Corr{entry}",
+                [h_up, h_down],
+                syst_name,
+                proc_name,
+                channel_name,
+                constrained=True,
+                symmetrize=symmetrize,
+                groups=groups,
+            )
+            print_flush(f"Added {syst_name} systematic for process {proc_name}")
+
+    # GammaZ width: EW-fit uncertainty +-0.8 MeV (entries 0/1 of the width weights,
+    # widthZ2p49493GeV/widthZ2p49333GeV = 2.49413 +- 0.0008 GeV), matching the
+    # 13 TeV alpha_s fit (setupRabbit.py: WidthZ0p8MeV, "Variation from EW fit").
+    # The PDG +-2.3 MeV pair (entries 2/4) is deliberately not used, for consistency
+    # with 13 TeV; switch to widthZ2p4975GeV/widthZ2p4929GeV to recover it.
+    _add_label_pair_syst(
+        h_widthweight_dict,
+        "width",
+        "widthZ2p49493GeV",
+        "widthZ2p49333GeV",
+        "widthZ0p8MeV",
+        ["widthZ", "theory"],
+    )
+
+    # effective weak mixing angle: EW-fit uncertainty +-0.00003 (entries 0/2;
+    # entry 1 is the central 0.23154)
+    _add_label_pair_syst(
+        h_sin2thetaweight_dict,
+        "sin2theta",
+        "sin2thetaZ0p23157",
+        "sin2thetaZ0p23151",
+        "sin2thetaZ0p00003",
+        ["sin2thetaZ", "theory"],
+    )
+
+    # b,c quark masses: the extreme MSHT20 mbrange/mcrange members (pdf1 =
+    # lowest mass, pdf6/pdf8 = highest; member 0 is the set's own central) as
+    # one Down/Up nuisance each, following the 13 TeV add_quark_mass_vars
+    # convention (BC_QUARK_MASS_VARIATIONS: mbrange pdf1/pdf6, mcrange
+    # pdf1/pdf8) with the quadratic symmetrization used for PDF uncertainties.
+    # No CL conversion: the MSHT20 range sets are not 90% CL eigenvectors.
+    _add_label_pair_syst(
+        h_bcmass_dicts["pdfMSHT20mbrange"],
+        "pdfVar",
+        "pdf6",
+        "pdf1",
+        "pdfMSHT20mbrange",
+        ["bcQuarkMass", "theory"],
+        symmetrize="quadratic",
+    )
+    _add_label_pair_syst(
+        h_bcmass_dicts["pdfMSHT20mcrange"],
+        "pdfVar",
+        "pdf8",
+        "pdf1",
+        "pdfMSHT20mcrange",
+        ["bcQuarkMass", "theory"],
+        symmetrize="quadratic",
+    )
+
+    # EW uncertainties from the borrowed 13 TeV ratio files, following
+    # rabbit_helpers.add_electroweak_uncertainty at 13 TeV:
+    # - powhegFOEW weak_ps/weak_aem -> virtual EW scheme variations,
+    #   weak_default -> virtual EW correction on/off (all mirrored)
+    # - horace FSR / photos MEC-off FSR: systIdx 1, mirrored
+    # - pythia ISR: systIdx 1, mirrored, kfactor 2
+    for proc_name, ew_hists in h_ew_corr_dict.items():
+        n_added = 0
+        h_fo = ew_hists.get("powhegFOEW")
+        if h_fo is not None:
+            for entry, subgroup in (
+                ("weak_ps", "theory_ew_virtZ_scheme"),
+                ("weak_aem", "theory_ew_virtZ_scheme"),
+                ("weak_default", "theory_ew_virtZ_corr"),
+            ):
+                writer.add_systematic(
+                    _rebin(h_fo[{"weak": entry}]) * mc_scale,
+                    f"powhegFOEW_Corr{entry}",
+                    proc_name,
+                    channel_name,
+                    mirror=True,
+                    constrained=True,
+                    groups=[subgroup, "theory_ew", "theory"],
+                )
+                n_added += 1
+        for tag, kfactor in (
+            ("horaceqedew_FSR", 1),
+            ("horacelophotosmecoffew_FSR", 1),
+            ("pythiaew_ISR", 2),
+        ):
+            h_ew = ew_hists.get(tag)
+            if h_ew is None:
+                continue
+            writer.add_systematic(
+                _rebin(h_ew[{"systIdx": 1}]) * mc_scale,
+                f"{tag}Corr1",
                 proc_name,
                 channel_name,
                 mirror=True,
                 constrained=True,
-                groups=[subgroup, "theory_ew", "theory"],
+                kfactor=kfactor,
+                groups=[f"theory_ew_{tag}", "theory_ew", "theory"],
             )
             n_added += 1
-    for tag, kfactor in (
-        ("horaceqedew_FSR", 1),
-        ("horacelophotosmecoffew_FSR", 1),
-        ("pythiaew_ISR", 2),
-    ):
-        h_ew = ew_hists.get(tag)
-        if h_ew is None:
+        print_flush(f"Added {n_added} EW/FSR systematics for {proc_name}")
+
+    # In-situ ID/HLT/Iso efficiencies (WRemnants PR #709, mz_5TeV.py
+    # --insituEffMCFile): one UNCONSTRAINED nuisance per Chebyshev coefficient,
+    # mirrored, named exactly as at 13 TeV (insitu_parameter_labels) and with the
+    # same name in every channel, so the four categories constrain them jointly.
+    for proc_name, h_ins in h_insitu_dict.items():
+        if proc_name not in h_mc_base:
             continue
-        writer.add_systematic(
-            _rebin(h_ew[{"systIdx": 1}]) * mc_scale,
-            f"{tag}Corr1",
-            proc_name,
-            channel_name,
-            mirror=True,
-            constrained=True,
-            kfactor=kfactor,
-            groups=[f"theory_ew_{tag}", "theory_ew", "theory"],
+        fit_axes = h_mc_base[proc_name].axes.name
+        n_sf = h_ins.axes["insituEffParm"].size
+        denom = muon_efficiencies_insitu.insitu_n_coeff_pt * (
+            2 + 3 * muon_efficiencies_insitu.insitu_n_coeff_ut
         )
-        n_added += 1
-    print_flush(f"Added {n_added} EW/FSR systematics for {proc_name}")
+        n_eta, rem = divmod(n_sf, denom)
+        if rem:
+            raise RuntimeError(f"insituEffParm size {n_sf} not divisible by {denom}")
+        labels = muon_efficiencies_insitu.insitu_parameter_labels(n_eta=n_eta)
+        assert len(labels) == n_sf, (len(labels), n_sf)
+        step_of = {g: g for g in muon_efficiencies_insitu.insitu_step_group.values()}
+        for i, lab in enumerate(labels):
+            h_var = _rebin(h_ins[{"insituEffParm": i}].project(*fit_axes)) * mc_scale
+            writer.add_systematic(
+                h_var,
+                lab,
+                proc_name,
+                channel_name,
+                mirror=True,
+                constrained=False,
+                groups=[
+                    "muonInsituEff",
+                    step_of[lab.split("_")[0]],
+                    "experiment",
+                    "expNoLumi",
+                    "expNoCalib",
+                ],
+            )
+        print_flush(
+            f"{channel_name}/{proc_name}: added {n_sf} in-situ efficiency nuisances"
+        )
 
-# Normalization uncertainties on the backgrounds (lnN)
-for proc in mc_procs:
-    if proc not in h_mc_base:
-        continue
-    if "Ztautau" in proc:
-        writer.add_norm_systematic(
-            f"norm_{proc}", proc, channel_name, 1.05, groups=["norm"]
-        )
-        print_flush(f"Added 5% normalization uncertainty for {proc}")
-    elif proc in background_procs:
-        writer.add_norm_systematic(
-            f"norm_{proc}", proc, channel_name, 1.10, groups=["norm"]
-        )
-        print_flush(f"Added 10% normalization uncertainty for {proc}")
+    # Normalization uncertainties on the backgrounds (lnN)
+    for proc in mc_procs:
+        if proc not in h_mc_base:
+            continue
+        if "Ztautau" in proc:
+            writer.add_norm_systematic(
+                f"norm_{proc}", proc, channel_name, 1.05, groups=["norm"]
+            )
+            print_flush(f"Added 5% normalization uncertainty for {proc}")
+        elif proc in background_procs:
+            writer.add_norm_systematic(
+                f"norm_{proc}", proc, channel_name, 1.10, groups=["norm"]
+            )
+            print_flush(f"Added 10% normalization uncertainty for {proc}")
 
-# Luminosity: the MC yields are absolute (lumi x xsec), so the lumi
-# nuisance is meaningful. Value is the canonical per-era number from
-# Datagroups.lumi_uncertainties (2017G = 1.019 = 1.9%), fully correlated
-# across all MC processes via the shared name "luminosity".
-lumi_unc = Datagroups.lumi_uncertainties["2017G"]
-lumi_procs = [p for p in mc_procs if p in h_mc_base]
-writer.add_norm_systematic(
-    "luminosity",
-    lumi_procs,
-    channel_name,
-    lumi_unc,
-    groups=["luminosity", "experiment"],
-)
-print_flush(
-    f"Added {(lumi_unc - 1) * 100:.1f}% luminosity uncertainty for {lumi_procs}"
-)
+    # Luminosity: the MC yields are absolute (lumi x xsec), so the lumi
+    # nuisance is meaningful. Value is the canonical per-era number from
+    # Datagroups.lumi_uncertainties (2017G = 1.019 = 1.9%), fully correlated
+    # across all MC processes via the shared name "luminosity".
+    lumi_unc = Datagroups.lumi_uncertainties["2017G"]
+    lumi_procs = [p for p in mc_procs if p in h_mc_base]
+    writer.add_norm_systematic(
+        "luminosity",
+        lumi_procs,
+        channel_name,
+        lumi_unc,
+        groups=["luminosity", "experiment"],
+    )
+    print_flush(
+        f"Added {(lumi_unc - 1) * 100:.1f}% luminosity uncertainty for {lumi_procs}"
+    )
+
+
+# The fit channels: the nominal one always; with --muonInsituEfficiency also the
+# three in-situ control categories booked by mz_5TeV.py --insituEffMCFile.
+CHANNELS = [("ch0", "ptll", args.histName, True)]
+if args.muonInsituEfficiency:
+    CHANNELS += [(c, c, c, False) for c in ("failIso", "failHLT", "failID")]
+for _ch in CHANNELS:
+    print_flush(f"===== channel {_ch[0]} (histograms {_ch[2]}, {_ch[1]}_*) =====")
+    process_channel(*_ch)
+
+h5file.close()
 
 # SCETlib-NP param model (PR #701): embed the response matrix R + gen-total
 # N_gen as the 'scetlib_np' auxiliary (mirroring setupRabbit), so the
@@ -1310,6 +1426,28 @@ if args.scetlibNPParamModel:
     )
     print_flush(
         f"Embedded scetlib_np auxiliary: R {R_info['R'].shape} from {zmumu_procs[0]}"
+    )
+
+if args.muonInsituEfficiency and args.insituEffMCFile is not None:
+    # grid for rabbit's InSituEfficiencyBound penalty (same as setupRabbit.py)
+    theta_central = (
+        muon_efficiencies_insitu.load_insitu_central(args.insituSFFile)
+        if args.insituSFFile
+        else None
+    )
+    aux = muon_efficiencies_insitu.merge_insitu_bound_aux(
+        [
+            muon_efficiencies_insitu.build_insitu_bound_aux(
+                muon_efficiencies_insitu.make_muon_insitu_effMC_helper(f),
+                theta_central=theta_central,
+            )
+            for f in args.insituEffMCFile
+        ]
+    )
+    writer.add_auxiliary(muon_efficiencies_insitu.INSITU_BOUND_AUX_NAME, aux)
+    print_flush(
+        f"Stored in-situ efficiency bound auxiliary "
+        f"'{muon_efficiencies_insitu.INSITU_BOUND_AUX_NAME}'"
     )
 
 # Propagate meta info (mirroring setupRabbit): the histmaker's meta_info goes

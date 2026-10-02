@@ -131,6 +131,11 @@ Vec_i cleanJetsFromLeptons(const Vec_f &Jet_eta, const Vec_f &Jet_phi,
   return res;
 }
 
+// HLT_HIMu17 trigger-object filter bit for 2017G -- see
+// goodMuonTriggerCandidate. 0 = not yet known (no muon TrigObj in the current 5
+// TeV NanoAOD).
+constexpr int FILTERBIT_HIMU17_2017G = 0;
+
 template <Era era>
 Vec_i goodMuonTriggerCandidate(const Vec_i &TrigObj_id, const Vec_f &TrigObj_pt,
                                const Vec_f &TrigObj_l1pt,
@@ -171,6 +176,18 @@ Vec_i goodMuonTriggerCandidate(const Vec_i &TrigObj_id,
       continue;
     if constexpr (era == Era::Era_2016PostVFP) {
       if (!((TrigObj_filterBits[i] & 16) || (TrigObj_filterBits[i] & 32)))
+        continue;
+    } else if constexpr (era == Era::Era_2017G) {
+      // 5.02 TeV low-PU, HLT_HIMu17. The filter bit identifying the HIMu17 L3
+      // muon object is set by the trigger-object table of the NanoAOD
+      // reproduction that adds muon TrigObj, which does not exist yet, so it
+      // CANNOT be chosen here -- guessing would produce wrong tags the day the
+      // objects arrive. FILTERBIT_HIMU17_2017G = 0 makes every object fail, so
+      // there are no tags and the in-situ categories stay empty: the same
+      // outcome as today, when TrigObj holds no muons at all. Set it once the
+      // new NanoAOD's TrigObj_filterBits for muons in HIMu17 events are
+      // inspected.
+      if (!(TrigObj_filterBits[i] & FILTERBIT_HIMU17_2017G))
         continue;
     } else {
       if (!(TrigObj_filterBits[i] & 4096))

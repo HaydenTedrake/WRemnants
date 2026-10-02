@@ -14,10 +14,18 @@ python scripts/histmakers/mz_5TeV.py --dataPath /scratch/submit/cms/wmass/NanoAO
     --muonCorr scarekit \
     --helicityXsecsFile wremnants-data/data/w_z_helicity_xsecs_5TeV.hdf5 \
     -j 16
-# MUON EFFICIENCIES: add both, always
-#   --muonScaleFactors        <sf_id.hdf5>          the ID: reco x idip, per muon
-#   --muonTriggerScaleFactors <sf_trig_permuon.hdf5> the trigger, per muon
-# This is the lowPU ('1HLT') parity configuration and it is the one to use.
+# MUON EFFICIENCIES: two SEPARATE corrections, pass both --
+#   --muonScaleFactors        <sf_id.hdf5>           the ID       (reco x idip)
+#   --muonTriggerScaleFactors <sf_trig_permuon.hdf5> the trigger  ('1HLT')
+# Both are per muon. The ID weight is SF_reco(mu1)*SF_idip(mu1)*SF_reco(mu2)*
+# SF_idip(mu2); the trigger one is lowPU's combination,
+#   (1 - prod(1-eps_data)) / (1 - prod(1-eps_MC)) = P(>=1 muon fired) data/MC,
+# which is why its map stores eps_data and eps_MC separately rather than a ratio.
+# This pair is the lowPU ('1HLT') parity configuration.
+# DO NOT CONFUSE with --muonEventScaleFactors: that is the SAME trigger
+# correction in event-level form, so it replaces --muonTriggerScaleFactors
+# rather than adding to it. mz_5TeV.py raises if both are given (it would
+# correct the trigger twice). Parity wants the per-muon one.
 import pdb; pdb.set_trace()
 
 ## Making plots straight off the histmaker output
@@ -614,7 +622,63 @@ EXPECTED NUMBERS (alpha_s x10^-3, traditional impacts, blinded Asimov)
   PDF eigenvector quadrature: 5 TeV 1.32 | 13 TeV 2.52 (0.3/fb), 0.67 (16.8/fb)
 
 ===============================================================================
-MUON EFFICIENCIES, 5 TeV                                      (Sep-Oct 2026)
+IN-SITU MUON EFFICIENCIES (WRemnants PR #709)                 (Oct 2 2026)
+===============================================================================
+THIS IS THE IMPLEMENTATION WE FOLLOW NOW. The external-SF chain in the next
+section is superseded (code kept, still the default when no in-situ flag is
+given; the two modes refuse to run together).
+
+BLOCKED ON: muon trigger objects (TrigObj id 13) + the standalone-muon branches
+in the 5.02 TeV DATA NanoAOD (advisor is reproducing it). With the current files
+the in-situ selection finds no trigger-matched muon, so every channel is empty;
+the job raises with the list of missing branches if they are absent.
+When the new NanoAOD lands, set FILTERBIT_HIMU17_2017G in
+wremnants/production/include/utils.hpp to the HLT_HIMu17 filter bit (0 now =
+nothing passes, fail-safe on purpose).
+
+Method: ID / HLT / Iso floated in the fit as UNCONSTRAINED Chebyshev
+coefficients (48 eta x 4 pt [x 3 uT]; 2112 nuisances effInsituID/HLT/Iso_*,
+same names as 13 TeV), from four categories of the Z->mumu sample:
+  tag = passID && trigger-matched
+  2HLT (both tags, probe picked by isEvenEvent):
+     probe passIso -> ch0      NOMINAL (ptll x yll), the alpha_s channel
+     probe failIso -> failIso  (eta, pt, recoUT)
+  1HLT (exactly one tag; the other leg is the probe):
+     probe passID  -> failHLT  (eta, pt, recoUT, charge)
+     probe failID  -> failID   (eta, pt, charge)
+Every systematic is booked per channel. Reco/tracking stay external (no 2017G
+reco/tracking map yet -> not applied). Iso = Muon_pfRelIso04_all < 0.15
+(--isolationDefinition iso04; vtxAgn is MC-only at 5 TeV).
+NB the signal region CHANGES: both muons pt > 26, trigger-matched, ID'd, and
+the probe isolated (old: pt > 18, mediumId && isGlobal, no iso).
+
+CHAIN (histmaker flags as in mz_dilepton.py):
+  0. python scripts/histmakers/mz_5TeV.py <usual flags> --makeInsituEffMC \
+       --filterProcs Zmumu
+     python scripts/corrections/make_insitu_effMC.py -i <out.hdf5> \
+       --outpath <dir> -p 5TeV          -> insitu_effMC_5TeV_Zmumu.pkl.lz4
+  1. python scripts/histmakers/mz_5TeV.py <usual flags> \
+       --insituEffMCFile <dir>/insitu_effMC_5TeV_Zmumu.pkl.lz4
+     python scripts/rabbit/setupRabbit_5TeV.py <out.hdf5> --histName ptll_vs_yll \
+       --ptllMax 44 --scetlibNPParamModel --muonInsituEfficiency \
+       --insituEffMCFile <same effMC>
+     rabbit_fit.py <tensor> -t -1 ...       (blinded Asimov, as always)
+  n. iterate: make_insitu_effSF.py on the fit -> rerun the histmaker with
+     --insituSFFile <theta_central>, setupRabbit_5TeV.py with the same
+     --insituSFFile, until max|delta*n_hat| -> 0.
+
+VALIDATED Oct 2 (/work/submit/hayden17/eff_oct2/insitu_smoke/):
+  - default path bit-identical (histmaker 48 hists to 2e-15; tensor identical
+    up to group-index ORDER, i.e. Python set order)
+  - with a FAKE trigger (pt>17 and a pseudo-random 90% per leg, scratch copy,
+    never committed): pass 0 -> effMC (ID 0.992, trig 0.872, iso 0.943) ->
+    pass 1 -> 4-channel tensor (2130 params) -> blinded Asimov fit converges,
+    posdef Hessian, all coefficient sigmas finite.
+    With trigger eff = 1 the fit is singular (ID degenerate with HLT because
+    failHLT is empty) -- expected, and a useful check once real TrigObjs exist.
+
+===============================================================================
+MUON EFFICIENCIES, 5 TeV  -- SUPERSEDED by the in-situ section above (Sep-Oct)
 ===============================================================================
 lowPU ('1HLT') parity throughout: per-muon maps, step names matching 13 TeV so
 the styles.py nuisance groups work, and the trigger combined with lowPU's own
@@ -898,11 +962,86 @@ QUESTIONS FOR LUCA (with code pointers)
 PLOTS
 -------------------------------------------------------------------------------
   Pre-efficiency reference set (12 plots): ~/public_html/oct2/
-  Efficiency-aware set: ~/public_html/oct2_eff/ -- 5 of 12 so far (the four
-  impact overlays + the grouped 5 TeV impacts as HTML). The grouped PNG fails in
-  Kaleido (error 525); the HTML is fine. The other 7 need the prefit-hist pass
-  (run_savehists.sh, 400 GB/200 cpu), which was queueing to 22:14.
+  Efficiency-aware set: ~/public_html/oct2_eff/ -- COMPLETE (12 plots + one
+  extra showing what the efficiency nuisances do to the ptll template,
+  prefit_muoneff_5tev). Only the grouped-impact PNG is missing: Kaleido dies
+  with error 525 on it, the HTML renders fine.
+  *** run_savehists.sh IS NOT NEEDED. *** The recipe routes the prefit template
+  plots through a separate 400 GB/200 cpu prefit pass, but rabbit_fit.py with
+    --saveHists --computeHistErrors --computeVariation -m Project ch0 ptll
+  produces the same hist_prefit_inclusive_variations in under 4 min on the LOGIN
+  NODE. Without --computeVariation and the -m projection the fitresult has
+  hist_prefit_inclusive only, and plot_com.py then cannot find the variations.
   Driver for the whole chain: /work/submit/hayden17/eff_oct2/run_chain.sh
   NB the production itself is ~8 min of compute -- when the SLURM queue is long,
   run it on the login node under setsid as run_production_jul14_backgrounds.sh
   does (peak RSS 52 GB against ~174 GB free).
+
+-------------------------------------------------------------------------------
+IMPLEMENTATION DIRECTION: ADAPT THE PR #709 IN-SITU EFFICIENCY WORKFLOW
+-------------------------------------------------------------------------------
+Decision/direction (Oct 2 2026): replace the external 5 TeV reco/idip SF-map
+plus inferred per-muon trigger-fit approach with the in-situ efficiency workflow
+shown in WMass/WRemnants PR #709. This is an adaptation to 5 TeV, not a direct
+cherry-pick: the PR machinery is built around the 13 TeV W/Z histmakers, its
+existing SF maps, selection categories, and fit setup.
+
+WHAT THE PR WORKFLOW DOES (from the PR #709 diff shared in chat)
+----------------------------------------------------------------
+  * Adds muon_efficiencies_insitu.py and an in-situ helper in
+    muon_efficiencies_smooth.hpp. ID, HLT and isolation efficiency corrections
+    are parameterized with Chebyshev coefficients in eta slices (ID in pT;
+    trigger/iso in pT and recoil uT, with charge treatment by step).
+  * The histmaker evaluates linearized MC efficiency-weight variations and
+    books them as muonInsituEff templates. Rabbit registers these as
+    unconstrained fit nuisances, so the selected data constrain efficiencies
+    together with the physics parameters instead of importing an external
+    TnP SF as the central correction.
+  * make_insitu_effSF.py reads fitted nuisance values and iterates the central
+    efficiency correction; make_insitu_effSF_from_tnp.py can instead project
+    existing external TnP SFs onto the same basis for a starting point.
+
+5 TeV ADAPTATION TO IMPLEMENT
+-----------------------------
+  1. Port the in-situ parameterization/helper and MC efficiency inputs into the
+     5 TeV dilepton histmaker. First establish the 5 TeV basis variables and
+     parameter labels; do not carry over uT or charge dependence by default.
+  2. Add pass/fail efficiency categories to the 5 TeV Z selection and book the
+     in-situ variation tensor on the same fit axes. The parameterization must
+     describe the selected 5 TeV observables without using the current
+     external reco/idip maps or trigger-fit eigenmodes as additional corrections.
+  3. Wire the 5 TeV Rabbit setup to register and group the in-situ nuisances,
+     then implement the fit-result-to-central-SF iteration and convergence
+     checks for 5 TeV. Preserve the central value used for each production so
+     the card constrains variations around the matching expansion point.
+  4. Validate closure on simulation, fit stability/identifiability, nuisance
+     correlations, and the effect on ptll/yll templates before treating the
+     result as an efficiency calibration.
+
+IMPORTANT 5 TeV DIFFERENCES / OPEN DECISIONS
+-------------------------------------------
+  * No usable muon TrigObj entries were found in the sampled 5 TeV NanoAOD.
+    The in-situ route may avoid requiring a per-muon trigger tag, but its HLT
+    category/likelihood still needs an explicit event-level definition and
+    validation. Do not silently reuse the pair-fit assumption
+    P(fire)=1-(1-e1)(1-e2).
+  * Current 5 TeV selection has no isolation requirement, so the PR's Iso leg
+    is not automatically part of this analysis. Decide whether it should be
+    omitted or whether the 5 TeV selection should change.
+  * 5 TeV has two selected muons and fits ptll x yll. Define how both legs enter
+    the event weights/categories and whether the in-situ parameters are shared
+    across legs and charges.
+  * Decide which detector effects are floated in situ (mediumId, isGlobal,
+    HLT), and whether existing scarekit momentum corrections and their
+    uncertainties remain external. Avoid double-applying existing SFs.
+  * The 5 TeV Z sample, event trigger paths, backgrounds, statistics and fit
+    observables differ from the PR's 13 TeV use. The analysis team must approve
+    the efficiency model, parameterization granularity/regularization, and
+    category definitions before implementation is considered physics-valid.
+
+Relevant PR #709 components to inspect while porting: new
+wremnants/production/muon_efficiencies_insitu.py;
+wremnants/production/include/muon_efficiencies_smooth.hpp;
+wremnants/production/systematics.py; wremnants/postprocessing/rabbit_helpers.py;
+scripts/histmakers/mz_dilepton.py and mw_with_mu_eta_pt.py;
+scripts/rabbit/setupRabbit.py; scripts/corrections/make_insitu_effSF.py.

@@ -403,6 +403,10 @@ def hlt_string(era="2016PostVFP"):
             hltString = "HLT_IsoMu24"  # to be potentially replaced by HLT_IsoMu27
         case "2018":
             hltString = "HLT_IsoMu24"
+        case "2017G":
+            # 5.02 TeV low-PU run; falling through to the default would give
+            # the 13 TeV high-PU HLT_IsoMu24
+            hltString = "HLT_HIMu17"
         case _:
             hltString = "HLT_IsoMu24"
     return hltString

@@ -16,6 +16,57 @@ parser.add_argument(
     "the physics histograms from such a run are NOT the analysis ones. Uses "
     "uncorrected kinematics, since corrected pt is undefined when a refit fails.",
 )
+# ---- In-situ muon efficiencies (WRemnants PR #709) --------------------------
+# ID, trigger and isolation efficiencies floated in the fit as unconstrained
+# Chebyshev coefficients, measured from four categories of the dimuon sample
+# (nominal = 2HLT_passIso, failIso, failHLT = 1HLT_passID, failID). The mode is
+# implied by its inputs, exactly as in mz_dilepton.py:
+#   pass 0   --makeInsituEffMC                -> effMCprobe_* spectra, from which
+#            scripts/corrections/make_insitu_effMC.py builds the effMC file
+#   pass 1   --insituEffMCFile <effMC>        -> four fit channels + variations
+#   pass n   ... --insituSFFile <theta_central> (from make_insitu_effSF.py)
+# REQUIRES muon trigger objects (TrigObj id 13) and standalone-muon branches in
+# the NanoAOD; neither exists in the current 5.02 TeV production. See
+# hayden_notes.txt, "IN-SITU MUON EFFICIENCIES".
+parser.add_argument(
+    "--insituEffMCFile",
+    type=str,
+    default=None,
+    help="MC efficiency pkl from make_insitu_effMC.py. Enables the in-situ "
+    "efficiency mode: four fit channels and the muonInsituEff variations.",
+)
+parser.add_argument(
+    "--insituSFFile",
+    type=str,
+    default=None,
+    help="Accumulated theta_central pkl from make_insitu_effSF.py (iteration "
+    ">= 1): reweights the MC by the current central in-situ scale factor.",
+)
+parser.add_argument(
+    "--makeInsituEffMC",
+    action="store_true",
+    help="In-situ pass 0: emit the effMCprobe_* probe spectra that "
+    "make_insitu_effMC.py turns into the --insituEffMCFile input.",
+)
+# The common parser only gives these to high-PU analyses; the low-PU label of
+# this script does not get them, and the in-situ mode needs an isolation.
+if "--isolationDefinition" not in parser._option_string_actions:
+    parser.add_argument(
+        "--isolationDefinition",
+        choices=["iso04vtxAgn", "iso04", "iso04chg", "iso04chgvtxAgn"],
+        # iso04 is the only definition whose branch (Muon_pfRelIso04_all)
+        # exists in the 5.02 TeV DATA NanoAOD; the 13 TeV default, iso04vtxAgn,
+        # needs Muon_vtxAgnPfRelIso04_all, which only the MC carries.
+        default="iso04",
+        help="Isolation used by the in-situ efficiency categories",
+    )
+if "--isolationThreshold" not in parser._option_string_actions:
+    parser.add_argument(
+        "--isolationThreshold",
+        type=float,
+        default=0.15,
+        help="Isolation threshold for the in-situ efficiency categories",
+    )
 parser.add_argument(
     "--muonEventScaleFactors",
     default=None,
@@ -104,6 +155,8 @@ import ROOT
 import narf
 from wremnants.production import (
     generator_level_definitions,
+    muon_efficiencies_insitu,
+    muon_selections,
     systematics,
     theory_corrections,
 )
@@ -397,6 +450,379 @@ if args.muonTriggerScaleFactors:
     logger.info(f"Muon per-muon trigger maps: {args.muonTriggerScaleFactors}")
 
 
+# ---- In-situ efficiency setup (PR #709) --------------------------------------
+insituMode = args.insituEffMCFile is not None or args.makeInsituEffMC
+isoBranch = None
+muon_insitu_efficiency_helper = None
+muon_insitu_central_helper = None
+if insituMode:
+    for _opt in (
+        "muonEfficiencyHists",
+        "muonScaleFactors",
+        "muonTriggerScaleFactors",
+        "muonEventScaleFactors",
+    ):
+        if getattr(args, _opt):
+            raise ValueError(
+                f"--{_opt} belongs to the external-SF efficiency treatment; the "
+                "in-situ mode floats ID/HLT/Iso in the fit instead. Use one."
+            )
+    isoBranch = muon_selections.getIsoBranch(args.isolationDefinition)
+    (
+        muon_insitu_efficiency_helper,
+        muon_insitu_central_helper,
+        _insitu_labels,
+    ) = muon_efficiencies_insitu.setup_muon_insitu_helpers(
+        args.insituEffMCFile, args.insituSFFile, args.makeInsituEffMC
+    )
+    # probe axes of the three control channels, exactly as in mz_dilepton.py
+    # (the Chebyshev window is fixed centrally in muon_efficiencies_insitu)
+    axis_insitu_eta = hist.axis.Regular(
+        int(args.eta[0]),
+        args.eta[1],
+        args.eta[2],
+        name="eta",
+        underflow=False,
+        overflow=False,
+    )
+    axis_pt_failID = hist.axis.Variable(
+        muon_efficiencies_insitu.insitu_pt_edges(args.pt[2]),
+        name="pt",
+        underflow=False,
+        overflow=False,
+    )
+    axis_recoUT = hist.axis.Variable(
+        muon_efficiencies_insitu.insitu_ut_edges,
+        name="recoUT",
+        underflow=False,
+        overflow=False,
+    )
+    axis_insitu_charge = binning.axis_charge
+    axes_insitu_effMC, cols_insitu_effMC = (
+        muon_efficiencies_insitu.make_insitu_effMC_axes(
+            args.eta[0], args.eta[1], args.eta[2]
+        )
+    )
+    logger.info(
+        f"In-situ efficiency mode: iso {isoBranch} < {args.isolationThreshold},"
+        f" probe pt > {muon_efficiencies_insitu.insitu_pt_range[0]} GeV"
+    )
+
+# NanoAOD branches the in-situ selection reads. Checked per dataset so the job
+# stops with the list instead of failing inside the JIT.
+INSITU_REQUIRED_BRANCHES = [
+    "Muon_standalonePt",
+    "Muon_standaloneEta",
+    "Muon_standalonePhi",
+    "Muon_standaloneNumberOfValidHits",
+    "TrigObj_id",
+    "TrigObj_filterBits",
+    "TrigObj_eta",
+    "TrigObj_phi",
+    "Muon_highPurity",
+    "Muon_dxybs",
+]
+
+
+def define_insitu_muon_selection(df, dataset):
+    """The PR #709 tag-and-probe muon selection, on the 5.02 TeV kinematics.
+
+    Reuses the shared muon_selections helpers unchanged. They read the
+    Muon_corrected* columns, which at 13 TeV come from the CVH calibration; here
+    they are the scarekit-calibrated kinematics. Returns a dataframe with
+    firstMuons / secondMuons (negative / positive, as in the dilepton
+    convention), their per-leg passID0 / passTrigger0 / passIso0 flags, and the
+    i0 / i1 indices the rest of this histmaker builds its dimuon kinematics from.
+    """
+    cols = {str(c) for c in df.GetColumnNames()}
+    missing = [b for b in INSITU_REQUIRED_BRANCHES if b not in cols]
+    if isoBranch not in cols:
+        missing.append(isoBranch)
+    if missing:
+        raise RuntimeError(
+            f"{dataset.name}: the in-situ efficiency mode needs NanoAOD branches"
+            f" this production does not have: {missing}. The standalone-muon and"
+            " vertex-agnostic isolation branches exist in the 5.02 TeV MC but not"
+            " in the data; they have to be added in the NanoAOD reproduction."
+        )
+
+    df = df.Alias("Muon_correctedPt", "Muon_pt_corr")
+    df = df.Alias("Muon_correctedEta", "Muon_eta")
+    df = df.Alias("Muon_correctedPhi", "Muon_phi")
+    df = df.Alias("Muon_correctedCharge", "Muon_charge")
+
+    # defines Muon_isGoodGlobal (from the standalone-muon branches) and vetoMuons
+    df = muon_selections.select_veto_muons(df, nMuons=-1)
+    # T&P probe denominator: good global muon, no ID requirement. The pt cut is
+    # the lower edge of the shared Chebyshev window, so changing that window
+    # moves the probe cut with it.
+    df = df.Define(
+        "insituProbeMuons",
+        "Muon_isGoodGlobal && Muon_correctedCharge != -99"
+        f" && Muon_correctedPt > {muon_efficiencies_insitu.insitu_pt_range[0]}"
+        " && abs(Muon_correctedEta) < 2.4",
+    )
+    df = df.Filter("Sum(insituProbeMuons) == 2", "in-situ: two probe muons")
+    # at least one good (= passes ID) muon: the tag
+    df = muon_selections.select_good_muons(
+        df,
+        args.pt[1],
+        args.pt[2],
+        nMuons=1,
+        condition=">=",
+        use_isolation=False,
+        isoBranch=isoBranch,
+        isoThreshold=args.isolationThreshold,
+    )
+    df = muon_selections.define_two_muons(df, dilepton=True, muons="insituProbeMuons")
+    # MUST come before anything evaluates firstMuons_pt0: that column indexes
+    # [firstMuons][0] and runs off the end for a same-charge probe pair
+    df = df.Filter(
+        "Sum(firstMuons) == 1 && Sum(secondMuons) == 1", "in-situ: opposite charge"
+    )
+    df = muon_selections.select_standalone_muons(df, dataset, False, "firstMuons")
+    df = muon_selections.select_standalone_muons(df, dataset, False, "secondMuons")
+    # per-leg trigger match, OR of the two legs (HLT_HIMu17 via Era_2017G)
+    df = muon_selections.apply_triggermatching_muon(
+        df, dataset, "firstMuons", "secondMuons", era=args.era
+    )
+    df = df.Define("firstMuons_passID0", "Sum(goodMuons && firstMuons) == 1")
+    df = df.Define("secondMuons_passID0", "Sum(goodMuons && secondMuons) == 1")
+    df = df.Define(
+        "firstMuons_passIso0", f"{isoBranch}[firstMuons][0] < {args.isolationThreshold}"
+    )
+    df = df.Define(
+        "secondMuons_passIso0",
+        f"{isoBranch}[secondMuons][0] < {args.isolationThreshold}",
+    )
+    df = df.Define("i0", "int(ROOT::VecOps::Nonzero(firstMuons)[0])")
+    df = df.Define("i1", "int(ROOT::VecOps::Nonzero(secondMuons)[0])")
+    return df
+
+
+def define_insitu_mc_uT(df):
+    """Gen-level uT per leg (MC only): the muon projected on the gen boson.
+
+    The in-situ helper parameterises trigger and isolation in this variable, as
+    SMP-23-002 does; only MC is reweighted, so data never needs it.
+    """
+    for leg in ("firstMuons", "secondMuons"):
+        df = df.Define(
+            f"{leg}_tnpUT0",
+            f"wrem::zqtproj0_boson({leg}_pt0, {leg}_phi0, ptVgen, phiVgen)",
+        )
+    return df
+
+
+def define_insitu_central_weight(df):
+    """W(theta_central) for iteration >= 1, folded into exp_weight. Mirrors
+    mz_dilepton.py: events with no tag (dropped from every channel) get W = 1."""
+    ci = systematics.insitu_category_index
+    df = df.Define("insituW_firstTag", "firstMuons_passID0 && firstMuons_passTrigger0")
+    df = df.Define(
+        "insituW_secondTag", "secondMuons_passID0 && secondMuons_passTrigger0"
+    )
+    df = df.Define(
+        "insituW_probeIsFirst",
+        "(insituW_firstTag && insituW_secondTag) ? isEvenEvent"
+        " : static_cast<bool>(!insituW_firstTag)",
+    )
+    for v in ("pt0", "eta0", "charge0", "tnpUT0"):
+        df = df.Define(
+            f"insituW_probe_{v}",
+            f"insituW_probeIsFirst ? firstMuons_{v} : secondMuons_{v}",
+        )
+        df = df.Define(
+            f"insituW_tag_{v}",
+            f"insituW_probeIsFirst ? secondMuons_{v} : firstMuons_{v}",
+        )
+    df = df.Define(
+        "insituW_cat",
+        "static_cast<int>((insituW_firstTag && insituW_secondTag) ? "
+        "((insituW_probeIsFirst ? firstMuons_passIso0 : secondMuons_passIso0) ? "
+        f"{ci['nominal']} : {ci['failIso']}) : "
+        "((insituW_probeIsFirst ? firstMuons_passID0 : secondMuons_passID0) ? "
+        f"{ci['failHLT']} : {ci['failID']}))",
+    )
+    df = df.Define(
+        "insituCentralW_raw",
+        muon_insitu_central_helper,
+        [
+            *(f"insituW_probe_{v}" for v in ("pt0", "eta0", "charge0", "tnpUT0")),
+            *(f"insituW_tag_{v}" for v in ("pt0", "eta0", "charge0", "tnpUT0")),
+            "insituW_cat",
+        ],
+    )
+    return df.Define(
+        "insituCentralW",
+        "(insituW_firstTag + insituW_secondTag) >= 1 ? insituCentralW_raw : 1.0",
+    )
+
+
+def _assign_probe_tag(d, probe_is_first, is_mc):
+    """probeMuons_* / tagMuons_* columns given a C++ bool expression."""
+    for v in ("pt0", "eta0", "charge0", "phi0"):
+        d = d.Define(
+            f"probeMuons_{v}", f"({probe_is_first}) ? firstMuons_{v} : secondMuons_{v}"
+        )
+    for v in ("pt0", "eta0", "charge0"):
+        d = d.Define(
+            f"tagMuons_{v}", f"({probe_is_first}) ? secondMuons_{v} : firstMuons_{v}"
+        )
+    # reco uT: probe projected on the reconstructed Z -- no MET, data and MC
+    d = d.Define(
+        "probeMuons_recoUT0",
+        "static_cast<double>(wrem::zqtproj0_boson(probeMuons_pt0, probeMuons_phi0,"
+        " ptll, phill))",
+    )
+    if is_mc:
+        d = d.Define(
+            "probeMuons_tnpUT0",
+            f"({probe_is_first}) ? firstMuons_tnpUT0 : secondMuons_tnpUT0",
+        )
+        d = d.Define(
+            "tagMuons_tnpUT0",
+            f"({probe_is_first}) ? secondMuons_tnpUT0 : firstMuons_tnpUT0",
+        )
+    return d
+
+
+def define_insitu_channels(df, dataset, results):
+    """The four PR #709 fit channels, plus the pass-0 effMC spectra.
+
+    1HLT = exactly one muon passes ID and HLT (the tag); the other is the probe,
+           split into passID (-> failHLT channel) and failID.
+    2HLT = both are tags; one is taken at random as the probe, split into
+           passIso (-> the NOMINAL signal channel) and failIso.
+    """
+    is_mc = not dataset.is_data
+    df = df.Define("firstMuons_tag0", "firstMuons_passID0 && firstMuons_passTrigger0")
+    df = df.Define(
+        "secondMuons_tag0", "secondMuons_passID0 && secondMuons_passTrigger0"
+    )
+
+    df_1HLT = df.Filter("firstMuons_tag0 != secondMuons_tag0", "1HLT")
+    df_1HLT = _assign_probe_tag(df_1HLT, "!firstMuons_tag0", is_mc)
+    df_1HLT = df_1HLT.Define(
+        "probeMuons_passID0",
+        "firstMuons_tag0 ? secondMuons_passID0 : firstMuons_passID0",
+    )
+    df_1HLT_passID = df_1HLT.Filter("probeMuons_passID0 == 1")
+    df_1HLT_failID = df_1HLT.Filter("probeMuons_passID0 == 0")
+
+    df_2HLT = df.Filter("firstMuons_tag0 && secondMuons_tag0", "2HLT")
+    # the two legs are indistinguishable valid tags: pick the probe at random
+    df_2HLT = _assign_probe_tag(df_2HLT, "isEvenEvent", is_mc)
+    df_2HLT = df_2HLT.Define(
+        "probeMuons_passIso0",
+        "isEvenEvent ? firstMuons_passIso0 : secondMuons_passIso0",
+    )
+    df_2HLT_passIso = df_2HLT.Filter("probeMuons_passIso0 == 1")
+    df_2HLT_failIso = df_2HLT.Filter("probeMuons_passIso0 == 0")
+
+    if args.makeInsituEffMC and is_mc:
+        book_insitu_effMC(df_2HLT, df_1HLT_passID, df_1HLT_failID, results)
+
+    eta, pt, q, ut = axis_insitu_eta, axis_pt_failID, axis_insitu_charge, axis_recoUT
+    return {
+        # the signal channel keeps today's names, so setupRabbit_5TeV.py reads it
+        "nominal": {
+            "df": df_2HLT_passIso,
+            "axes": [axis_ptll, axis_yll],
+            "cols": ["ptll", "yll"],
+            "base": "ptll",
+            "nominal_name": "ptll_vs_yll",
+        },
+        "failIso": {
+            "df": df_2HLT_failIso,
+            "axes": [eta, pt, ut],
+            "cols": ["probeMuons_eta0", "probeMuons_pt0", "probeMuons_recoUT0"],
+            "base": "failIso",
+            "nominal_name": "failIso",
+        },
+        "failHLT": {
+            "df": df_1HLT_passID,
+            "axes": [eta, pt, ut, q],
+            "cols": [
+                "probeMuons_eta0",
+                "probeMuons_pt0",
+                "probeMuons_recoUT0",
+                "probeMuons_charge0",
+            ],
+            "base": "failHLT",
+            "nominal_name": "failHLT",
+        },
+        "failID": {
+            "df": df_1HLT_failID,
+            "axes": [eta, pt, q],
+            "cols": ["probeMuons_eta0", "probeMuons_pt0", "probeMuons_charge0"],
+            "base": "failID",
+            "nominal_name": "failID",
+        },
+    }
+
+
+def book_insitu_effMC(df_2HLT, df_1HLT_passID, df_1HLT_failID, results):
+    """Pass-0 effMCprobe_* spectra, as in mz_dilepton.py: both legs of each 2HLT
+    event (routed by their own isolation), the single probe of each 1HLT event."""
+    clamp = muon_efficiencies_insitu.insitu_ut_clamp_expr
+    d = df_2HLT
+    d = d.Define(
+        "effProbe2HLT_isoMask",
+        "ROOT::VecOps::RVec<bool>{firstMuons_passIso0, secondMuons_passIso0}",
+    )
+    d = d.Define(
+        "effProbe2HLT_failIsoMask",
+        "ROOT::VecOps::RVec<bool>{!firstMuons_passIso0, !secondMuons_passIso0}",
+    )
+    d = d.Define(
+        "effProbe2HLT_eta",
+        "ROOT::VecOps::RVec<float>{firstMuons_eta0, secondMuons_eta0}",
+    )
+    d = d.Define(
+        "effProbe2HLT_pt", "ROOT::VecOps::RVec<float>{firstMuons_pt0, secondMuons_pt0}"
+    )
+    d = d.Define(
+        "effProbe2HLT_charge",
+        "ROOT::VecOps::RVec<int>{firstMuons_charge0, secondMuons_charge0}",
+    )
+    d = d.Define(
+        "effProbe2HLT_uT",
+        "ROOT::VecOps::RVec<float>{"
+        + clamp("firstMuons_tnpUT0")
+        + ", "
+        + clamp("secondMuons_tnpUT0")
+        + "}",
+    )
+    for cat, mask in (
+        ("nominal", "effProbe2HLT_isoMask"),
+        ("failIso", "effProbe2HLT_failIsoMask"),
+    ):
+        for v in ("eta", "pt", "charge", "uT"):
+            d = d.Define(f"effProbe_{cat}_{v}", f"effProbe2HLT_{v}[{mask}]")
+        results.append(
+            d.HistoBoost(
+                f"effMCprobe_{cat}",
+                axes_insitu_effMC,
+                [f"effProbe_{cat}_{v}" for v in ("eta", "pt", "charge", "uT")]
+                + ["nominal_weight"],
+            )
+        )
+    for cat, d1 in (("failHLT", df_1HLT_passID), ("failID", df_1HLT_failID)):
+        if cat == "failID":
+            # an ID-passing probe above the good-muon pt window would otherwise
+            # be misclassified as failID (same guard as mz_dilepton.py)
+            d1 = d1.Filter(f"probeMuons_pt0 < {args.pt[2]}")
+        d1 = d1.Define("probeMuons_tnpUT0Clamped", clamp("probeMuons_tnpUT0"))
+        results.append(
+            d1.HistoBoost(
+                f"effMCprobe_{cat}",
+                axes_insitu_effMC,
+                [*cols_insitu_effMC[:-1], "probeMuons_tnpUT0Clamped", "nominal_weight"],
+            )
+        )
+
+
 def build_graph(df, dataset):
     logger.info(f"build graph for dataset: {dataset.name}")
 
@@ -620,28 +1046,35 @@ def build_graph(df, dataset):
     df = df.Define("nLepton", "nElectron + nMuon")
 
     # ---- Good muons (for Z->mumu selection) ----
+    if insituMode:
+        if args.sameSign:
+            raise ValueError("--sameSign is not defined for the in-situ categories")
+        # PR #709 tag-and-probe selection; defines i0 / i1 (negative / positive)
+        df = define_insitu_muon_selection(df, dataset)
     # When measuring efficiencies the probe must not already carry the
     # requirement being measured, so the analysis ID is relaxed to loose.
     _muId = (
-        "Muon_looseId"
-        if args.muonEfficiencyHists
-        else "Muon_mediumId && Muon_isGlobal"
+        "Muon_looseId" if args.muonEfficiencyHists else "Muon_mediumId && Muon_isGlobal"
     )
-    df = df.Define(
-        "goodMu",
-        f"Muon_pt_corr > 18 && abs(Muon_eta) < 2.4 && {_muId}",
-    )
-    df = df.Define("goodMu_idx", "ROOT::VecOps::Nonzero(goodMu)")
-    df = df.Filter("goodMu_idx.size() == 2", "Exactly two good muons")
+    if not insituMode:
+        df = df.Define(
+            "goodMu",
+            f"Muon_pt_corr > 18 && abs(Muon_eta) < 2.4 && {_muId}",
+        )
+        df = df.Define("goodMu_idx", "ROOT::VecOps::Nonzero(goodMu)")
+        df = df.Filter("goodMu_idx.size() == 2", "Exactly two good muons")
 
     # ---- Filter out events with extra electrons ----
     df = df.Filter("nElectron == 0", "No electrons in the event")
 
     # Opposite sign (or same sign for the fakes control region)
-    df = df.Define("i0", "int(goodMu_idx[0])").Define("i1", "int(goodMu_idx[1])")
-    if args.sameSign:
+    if insituMode:
+        pass  # opposite charge is built into firstMuons / secondMuons
+    elif args.sameSign:
+        df = df.Define("i0", "int(goodMu_idx[0])").Define("i1", "int(goodMu_idx[1])")
         df = df.Filter("Muon_charge[i0] * Muon_charge[i1] > 0", "Same-sign muons")
     else:
+        df = df.Define("i0", "int(goodMu_idx[0])").Define("i1", "int(goodMu_idx[1])")
         df = df.Filter("Muon_charge[i0] * Muon_charge[i1] < 0", "Opposite-sign muons")
 
     # ---- Build dimuon kinematics ----
@@ -708,9 +1141,19 @@ def build_graph(df, dataset):
     if dataset.is_data:
         df = df.Define("nominal_weight", "1.0")
     else:
-        df = df.Alias("exp_weight", "weight")
-
-        df = generator_level_definitions.define_prefsr_vars(df)
+        if insituMode:
+            # the in-situ helpers need the gen-level uT, so the pre-FSR boson
+            # comes first; iteration >= 1 folds W(theta_central) into exp_weight
+            df = generator_level_definitions.define_prefsr_vars(df)
+            df = define_insitu_mc_uT(df)
+            if args.insituSFFile is not None:
+                df = define_insitu_central_weight(df)
+                df = df.Define("exp_weight", "weight*insituCentralW")
+            else:
+                df = df.Alias("exp_weight", "weight")
+        else:
+            df = df.Alias("exp_weight", "weight")
+            df = generator_level_definitions.define_prefsr_vars(df)
         df = df.DefinePerSample("theory_weight_truncate", "10.0")
         # the theory-correction denominators are made with the CT18Z central
         # weight applied (gen histmaker runs with --pdfs ct18z), so the reco
@@ -810,14 +1253,10 @@ def build_graph(df, dataset):
             df, dataset.is_data, [muon_efficiencies_5TeV.trigger_step()]
         ):
             # (a) the event-level map, binned in the fit variables
-            muon_efficiencies_5TeV.book_event_efficiency_hist(
-                df, results, _evt_step
-            )
+            muon_efficiencies_5TeV.book_event_efficiency_hist(df, results, _evt_step)
             # (b) the muon-PAIR counts the per-muon fit needs, for full lowPU
             # ('1HLT') parity -- see the comment above trigger_bin_index_expr
-            muon_efficiencies_5TeV.book_trigger_pair_hist(
-                df, results, _evt_step
-            )
+            muon_efficiencies_5TeV.book_trigger_pair_hist(df, results, _evt_step)
 
         for _step in eff_steps:
             df_eff = muon_efficiencies_5TeV.define_probes(df, _step)
@@ -831,6 +1270,14 @@ def build_graph(df, dataset):
                 n_eta=args.muonEffEtaBins,
                 n_pt=args.muonEffPtBins,
             )
+
+    # ---- In-situ channels (PR #709) ----
+    # Built here so the control plots below show the signal channel
+    # (2HLT_passIso), which is what the fit's nominal template is.
+    insitu_dfs = None
+    if insituMode:
+        insitu_dfs = define_insitu_channels(df, dataset, results)
+        df = insitu_dfs["nominal"]["df"]
 
     # ---- Fill histograms ----
     hist_nLepton = df.HistoBoost(
@@ -907,224 +1354,259 @@ def build_graph(df, dataset):
         "phiStarll", [axis_phiStarll], ["phiStarll", "nominal_weight"]
     )
 
-    # 2D histograms
-    hist_ptll_vs_yll = df.HistoBoost(
-        "ptll_vs_yll", [axis_ptll, axis_yll], ["ptll", "yll", "nominal_weight"]
-    )
+    # ---- Fit channels -------------------------------------------------------
+    # Following WRemnants PR #709: every fit template is booked once per channel.
+    # By default there is exactly ONE channel -- today's selection with today's
+    # histogram names (ptll_vs_yll, ptll_<syst>) -- so the classic analysis is
+    # unchanged. The in-situ efficiency mode adds the failIso / failHLT / failID
+    # control channels, each with its own axes and histogram base name.
+    dfs = {
+        "nominal": {
+            "df": df,
+            "axes": [axis_ptll, axis_yll],
+            "cols": ["ptll", "yll"],
+            "base": "ptll",
+            "nominal_name": "ptll_vs_yll",
+        }
+    }
+    if insitu_dfs is not None:
+        dfs = insitu_dfs
 
-    # SCETlib-NP param-model response R (PR #701): reco x gen joint yield on
-    # the fully selected reco events. Same reco axes as the fit hist;
-    # acceptance = the event falls in the gen-fiducial region N_gen is filled
-    # on (load_R slices acceptance=True, so reco-passing events outside the
-    # gen fiducial are excluded from the fold, as in the 13 TeV setup).
-    if not dataset.is_data and "Zmumu" in dataset.name:
-        df = df.Define(
-            "prefsr_acceptance",
-            "genl.pt() > 18 && genlanti.pt() > 18 && "
-            "std::fabs(genl.eta()) < 2.4 && std::fabs(genlanti.eta()) < 2.4 && "
-            "massVgen > 76 && massVgen < 106",
-        )
-        df = df.Define("helicitySigUL", "int(-1)")
+    for channel, info in dfs.items():
+        df_ch = info["df"]
+        axes = info["axes"]
+        cols = info["cols"]
+        bn = info["base"]
         results.append(
-            df.HistoBoost(
-                "nominal_prefsr_yieldsUnfolding",
-                [
-                    axis_ptll,
-                    axis_yll,
-                    axis_ptVGen,
-                    axis_absYVGen,
-                    axis_acceptance,
-                    axis_helicitySig_ul,
-                ],
-                [
-                    "ptll",
-                    "yll",
-                    "ptVgen",
-                    "absYVgen",
-                    "prefsr_acceptance",
-                    "helicitySigUL",
-                    "nominal_weight",
-                ],
-            )
+            df_ch.HistoBoost(info["nominal_name"], axes, [*cols, "nominal_weight"])
         )
-    # MINIMUM BIN CONTENT: 95.79483724339086 at bin (ptll index 35, yll index 6) → ptll ∈ [28, 30) GeV, yll ∈ [0.25, 0.5)
-    # DATA MINIMUM BIN CONTENT: 88.0 at bin (ptll index 35, yll index 3) → ptll ∈ [28, 30) GeV, yll ∈ [-0.5, -0.25)
-
-    if not dataset.is_data:
-        # Muon efficiency template variations, on the same axes as the fit
-        # templates. Booked for every MC process, signal and background alike:
-        # the SF is applied to all of them, so they all respond to it.
-        if muon_trig_helpers_stat:
-            df = muon_efficiencies_5TeV.add_muon_trigger_unc_hists_5TeV(
+        # in-situ ID/HLT/Iso Chebyshev variations (pass >= 1, MC only)
+        if muon_insitu_efficiency_helper is not None and not dataset.is_data:
+            systematics.add_muon_insitu_efficiency_hists(
                 results,
-                df,
-                muon_trig_helpers_stat,
-                [axis_ptll, axis_yll],
-                ["ptll", "yll"],
-                base_name="ptll",
+                df_ch,
+                muon_insitu_efficiency_helper,
+                axes,
+                cols,
+                category=channel,
+                base_name=bn,
             )
 
-        if muon_event_helpers_stat:
-            df = muon_efficiencies_5TeV.add_muon_efficiency_event_unc_hists_5TeV(
-                results,
-                df,
-                muon_event_helpers_stat,
-                muon_event_helper_syst,
-                [axis_ptll, axis_yll],
-                ["ptll", "yll"],
-                base_name="ptll",
+        # SCETlib-NP param-model response R (PR #701): reco x gen joint yield on
+        # the fully selected reco events. Same reco axes as the fit hist;
+        # acceptance = the event falls in the gen-fiducial region N_gen is filled
+        # on (load_R slices acceptance=True, so reco-passing events outside the
+        # gen fiducial are excluded from the fold, as in the 13 TeV setup).
+        if channel == "nominal" and not dataset.is_data and "Zmumu" in dataset.name:
+            df_ch = df_ch.Define(
+                "prefsr_acceptance",
+                "genl.pt() > 18 && genlanti.pt() > 18 && "
+                "std::fabs(genl.eta()) < 2.4 && std::fabs(genlanti.eta()) < 2.4 && "
+                "massVgen > 76 && massVgen < 106",
             )
-
-        if muon_efficiency_helpers_stat:
-            df = muon_efficiencies_5TeV.add_muon_efficiency_unc_hists_5TeV(
-                results,
-                df,
-                muon_efficiency_helpers_stat,
-                muon_efficiency_helper_syst,
-                [axis_ptll, axis_yll],
-                ["ptll", "yll"],
-                base_name="ptll",
+            df_ch = df_ch.Define("helicitySigUL", "int(-1)")
+            results.append(
+                df_ch.HistoBoost(
+                    "nominal_prefsr_yieldsUnfolding",
+                    [
+                        axis_ptll,
+                        axis_yll,
+                        axis_ptVGen,
+                        axis_absYVGen,
+                        axis_acceptance,
+                        axis_helicitySig_ul,
+                    ],
+                    [
+                        "ptll",
+                        "yll",
+                        "ptVgen",
+                        "absYVgen",
+                        "prefsr_acceptance",
+                        "helicitySigUL",
+                        "nominal_weight",
+                    ],
+                )
             )
+        # MINIMUM BIN CONTENT: 95.79483724339086 at bin (ptll index 35, yll index 6) → ptll ∈ [28, 30) GeV, yll ∈ [0.25, 0.5)
+        # DATA MINIMUM BIN CONTENT: 88.0 at bin (ptll index 35, yll index 3) → ptll ∈ [28, 30) GeV, yll ∈ [-0.5, -0.25)
 
-        if applied_theory_corrs:
-            systematics.add_theory_corr_hists(
-                results,
-                df,
-                [axis_ptll, axis_yll],
-                ["ptll", "yll"],
-                corr_helpers[dataset.name],
-                theory_corrs,
-                modify_central_weight=True,
-                isW=False,
-                base_name="ptll",
-            )
-
-        if applied_ew_corrs:
-            # EW/FSR variation templates from the borrowed 13 TeV ratio files
-            systematics.add_theory_corr_hists(
-                results,
-                df,
-                [axis_ptll, axis_yll],
-                ["ptll", "yll"],
-                ew_corr_helpers[dataset.name],
-                applied_ew_corrs,
-                modify_central_weight=False,
-                isW=False,
-                base_name="ptll",
-            )
-
-        # Helicity-decomposed QCD scale variations (angular coefficients):
-        # per-helicity muR/muF envelope from the gen helicity xsecs file,
-        # with a coarse ptVgen axis for nuisances decorrelated in ptV
-        if qcd_helicity_helper is not None and is_z_mc:
-            systematics.add_qcdScaleByHelicityUnc_hist(
-                results,
-                df,
-                qcd_helicity_helper,
-                [axis_ptll, axis_yll, axis_ptVgen_decorr],
-                ["ptll", "yll", "ptVgen"],
-                base_name="ptll",
-            )
-
-        # Z boson mass (and width-decorrelated) variations from the MiNNLO
-        # Breit-Wigner reweighting weights (MEParamWeight): 21 points in
-        # +-100 MeV steps of 10 MeV plus the +-2.1 MeV PDG-uncertainty
-        # entries; the fit uses massShiftZ2p1MeVUp/Down as the mZ uncertainty
-        if is_z_mc:
-            df = systematics.define_mass_width_sin2theta_weights(df, dataset.name)
-            if df.HasColumn("massWeight_tensor_wnom"):
-                systematics.add_massweights_hist(
+        if not dataset.is_data:
+            # Muon efficiency template variations, on the same axes as the fit
+            # templates. Booked for every MC process, signal and background alike:
+            # the SF is applied to all of them, so they all respond to it.
+            if muon_trig_helpers_stat:
+                df_ch = muon_efficiencies_5TeV.add_muon_trigger_unc_hists_5TeV(
                     results,
-                    df,
-                    [axis_ptll, axis_yll],
-                    ["ptll", "yll"],
-                    base_name="ptll",
-                    proc=dataset.name,
-                )
-            if df.HasColumn("widthWeight_tensor_wnom"):
-                systematics.add_widthweights_hist(
-                    results,
-                    df,
-                    [axis_ptll, axis_yll],
-                    ["ptll", "yll"],
-                    base_name="ptll",
-                    proc=dataset.name,
-                )
-            if df.HasColumn("sin2thetaWeight_tensor_wnom"):
-                systematics.add_sin2thetaweights_hist(
-                    results,
-                    df,
-                    [axis_ptll, axis_yll],
-                    ["ptll", "yll"],
-                    base_name="ptll",
-                    proc=dataset.name,
+                    df_ch,
+                    muon_trig_helpers_stat,
+                    axes,
+                    cols,
+                    base_name=bn,
                 )
 
-        # b,c quark mass variations (MSHT20nnlo mbrange/mcrange members from
-        # LHEPdfWeightAltSet12; same menu as the 13 TeV PDFExt samples: 65
-        # central + 7 alpha_s + 9 mcrange @72 + 7 mbrange @81 = 88 entries,
-        # verified identical layout - the branch title claims MMHT2014 but is
-        # a known gridpack mislabel at both energies). Each member is divided
-        # by the range set's own central (member 0), so only the pure mass
-        # variation is applied on top of the CT18Z-corrected nominal - the
-        # 13 TeV from-MiNNLO scheme (pdfs msht20mb(c)range_renorm, see
-        # theory_corrections.define_pdf_columns renorm branch).
-        if is_z_mc:
-            for pdf_key in ("msht20mbrange_renorm", "msht20mcrange_renorm"):
-                pdf_info = theory_utils.pdfMap[pdf_key]
-                n_entries = pdf_info["entries"]
-                pdf_tensor = f"{pdf_info['name']}Weights_tensor"
-                df = df.Define(
-                    pdf_tensor,
-                    f"auto res = wrem::vec_to_tensor_t<double, {n_entries}>("
-                    f"{pdf_info['branch']}, {pdf_info['first_entry']}); "
-                    "res = res / res(0); "
-                    "res = wrem::clip_tensor(res, theory_weight_truncate); "
-                    "res = res * nominal_weight; return res;",
+            if muon_event_helpers_stat:
+                df_ch = muon_efficiencies_5TeV.add_muon_efficiency_event_unc_hists_5TeV(
+                    results,
+                    df_ch,
+                    muon_event_helpers_stat,
+                    muon_event_helper_syst,
+                    axes,
+                    cols,
+                    base_name=bn,
                 )
-                axis_pdfVar = hist.axis.StrCategory(
-                    [f"pdf{i}" for i in range(n_entries)], name="pdfVar"
+
+            if muon_efficiency_helpers_stat:
+                df_ch = muon_efficiencies_5TeV.add_muon_efficiency_unc_hists_5TeV(
+                    results,
+                    df_ch,
+                    muon_efficiency_helpers_stat,
+                    muon_efficiency_helper_syst,
+                    axes,
+                    cols,
+                    base_name=bn,
                 )
-                results.append(
-                    df.HistoBoost(
-                        f"ptll_{pdf_info['name']}",
-                        [axis_ptll, axis_yll],
-                        ["ptll", "yll", pdf_tensor],
-                        tensor_axes=[axis_pdfVar],
+
+            if applied_theory_corrs:
+                systematics.add_theory_corr_hists(
+                    results,
+                    df_ch,
+                    axes,
+                    cols,
+                    corr_helpers[dataset.name],
+                    theory_corrs,
+                    modify_central_weight=True,
+                    isW=False,
+                    base_name=bn,
+                )
+
+            if applied_ew_corrs:
+                # EW/FSR variation templates from the borrowed 13 TeV ratio files
+                systematics.add_theory_corr_hists(
+                    results,
+                    df_ch,
+                    axes,
+                    cols,
+                    ew_corr_helpers[dataset.name],
+                    applied_ew_corrs,
+                    modify_central_weight=False,
+                    isW=False,
+                    base_name=bn,
+                )
+
+            # Helicity-decomposed QCD scale variations (angular coefficients):
+            # per-helicity muR/muF envelope from the gen helicity xsecs file,
+            # with a coarse ptVgen axis for nuisances decorrelated in ptV
+            if qcd_helicity_helper is not None and is_z_mc:
+                systematics.add_qcdScaleByHelicityUnc_hist(
+                    results,
+                    df_ch,
+                    qcd_helicity_helper,
+                    [*axes, axis_ptVgen_decorr],
+                    [*cols, "ptVgen"],
+                    base_name=bn,
+                )
+
+            # Z boson mass (and width-decorrelated) variations from the MiNNLO
+            # Breit-Wigner reweighting weights (MEParamWeight): 21 points in
+            # +-100 MeV steps of 10 MeV plus the +-2.1 MeV PDG-uncertainty
+            # entries; the fit uses massShiftZ2p1MeVUp/Down as the mZ uncertainty
+            if is_z_mc:
+                df_ch = systematics.define_mass_width_sin2theta_weights(
+                    df_ch, dataset.name
+                )
+                if df_ch.HasColumn("massWeight_tensor_wnom"):
+                    systematics.add_massweights_hist(
+                        results,
+                        df_ch,
+                        axes,
+                        cols,
+                        base_name=bn,
+                        proc=dataset.name,
                     )
-                )
-
-        # muon momentum scale/resolution statistical variations (scarekit
-        # bootstrap): recompute the dimuon kinematics from the varied muon pT.
-        # Selection (incl. the mll window) stays the nominal one; the residual
-        # window-migration effect of these ~1e-4 pT shifts is negligible for
-        # the ptll-yll templates.
-        if args.muonCorr == "scarekit":
-            for var, hname in [
-                ("scaleUp", "ptll_muonScaleUp"),
-                ("scaleDown", "ptll_muonScaleDown"),
-                ("resolUp", "ptll_muonResUp"),
-                ("resolDown", "ptll_muonResDown"),
-                ("scaleSystUp", "ptll_muonScaleSystUp"),
-                ("scaleSystDown", "ptll_muonScaleSystDown"),
-                ("resolSystUp", "ptll_muonResSystUp"),
-                ("resolSystDown", "ptll_muonResSystDown"),
-            ]:
-                ptcol = f"Muon_pt_corr_{var}"
-                df = df.Define(
-                    f"dimu_p4_{var}",
-                    f"ROOT::Math::PtEtaPhiMVector({ptcol}[i0], Muon_eta[i0], Muon_phi[i0], {MU_MASS})"
-                    f" + ROOT::Math::PtEtaPhiMVector({ptcol}[i1], Muon_eta[i1], Muon_phi[i1], {MU_MASS})",
-                )
-                df = df.Define(f"ptll_{var}", f"dimu_p4_{var}.Pt()")
-                df = df.Define(f"yll_{var}", f"dimu_p4_{var}.Rapidity()")
-                results.append(
-                    df.HistoBoost(
-                        hname,
-                        [axis_ptll, axis_yll],
-                        [f"ptll_{var}", f"yll_{var}", "nominal_weight"],
+                if df_ch.HasColumn("widthWeight_tensor_wnom"):
+                    systematics.add_widthweights_hist(
+                        results,
+                        df_ch,
+                        axes,
+                        cols,
+                        base_name=bn,
+                        proc=dataset.name,
                     )
-                )
+                if df_ch.HasColumn("sin2thetaWeight_tensor_wnom"):
+                    systematics.add_sin2thetaweights_hist(
+                        results,
+                        df_ch,
+                        axes,
+                        cols,
+                        base_name=bn,
+                        proc=dataset.name,
+                    )
+
+            # b,c quark mass variations (MSHT20nnlo mbrange/mcrange members from
+            # LHEPdfWeightAltSet12; same menu as the 13 TeV PDFExt samples: 65
+            # central + 7 alpha_s + 9 mcrange @72 + 7 mbrange @81 = 88 entries,
+            # verified identical layout - the branch title claims MMHT2014 but is
+            # a known gridpack mislabel at both energies). Each member is divided
+            # by the range set's own central (member 0), so only the pure mass
+            # variation is applied on top of the CT18Z-corrected nominal - the
+            # 13 TeV from-MiNNLO scheme (pdfs msht20mb(c)range_renorm, see
+            # theory_corrections.define_pdf_columns renorm branch).
+            if is_z_mc:
+                for pdf_key in ("msht20mbrange_renorm", "msht20mcrange_renorm"):
+                    pdf_info = theory_utils.pdfMap[pdf_key]
+                    n_entries = pdf_info["entries"]
+                    pdf_tensor = f"{pdf_info['name']}Weights_tensor"
+                    df_ch = df_ch.Define(
+                        pdf_tensor,
+                        f"auto res = wrem::vec_to_tensor_t<double, {n_entries}>("
+                        f"{pdf_info['branch']}, {pdf_info['first_entry']}); "
+                        "res = res / res(0); "
+                        "res = wrem::clip_tensor(res, theory_weight_truncate); "
+                        "res = res * nominal_weight; return res;",
+                    )
+                    axis_pdfVar = hist.axis.StrCategory(
+                        [f"pdf{i}" for i in range(n_entries)], name="pdfVar"
+                    )
+                    results.append(
+                        df_ch.HistoBoost(
+                            f"{bn}_{pdf_info['name']}",
+                            axes,
+                            [*cols, pdf_tensor],
+                            tensor_axes=[axis_pdfVar],
+                        )
+                    )
+
+            # muon momentum scale/resolution statistical variations (scarekit
+            # bootstrap): recompute the dimuon kinematics from the varied muon pT.
+            # Selection (incl. the mll window) stays the nominal one; the residual
+            # window-migration effect of these ~1e-4 pT shifts is negligible for
+            # the ptll-yll templates.
+            if args.muonCorr == "scarekit" and cols == ["ptll", "yll"]:
+                for var, hname in [
+                    ("scaleUp", f"{bn}_muonScaleUp"),
+                    ("scaleDown", f"{bn}_muonScaleDown"),
+                    ("resolUp", f"{bn}_muonResUp"),
+                    ("resolDown", f"{bn}_muonResDown"),
+                    ("scaleSystUp", f"{bn}_muonScaleSystUp"),
+                    ("scaleSystDown", f"{bn}_muonScaleSystDown"),
+                    ("resolSystUp", f"{bn}_muonResSystUp"),
+                    ("resolSystDown", f"{bn}_muonResSystDown"),
+                ]:
+                    ptcol = f"Muon_pt_corr_{var}"
+                    df_ch = df_ch.Define(
+                        f"dimu_p4_{var}",
+                        f"ROOT::Math::PtEtaPhiMVector({ptcol}[i0], Muon_eta[i0], Muon_phi[i0], {MU_MASS})"
+                        f" + ROOT::Math::PtEtaPhiMVector({ptcol}[i1], Muon_eta[i1], Muon_phi[i1], {MU_MASS})",
+                    )
+                    df_ch = df_ch.Define(f"ptll_{var}", f"dimu_p4_{var}.Pt()")
+                    df_ch = df_ch.Define(f"yll_{var}", f"dimu_p4_{var}.Rapidity()")
+                    results.append(
+                        df_ch.HistoBoost(
+                            hname,
+                            axes,
+                            [f"ptll_{var}", f"yll_{var}", "nominal_weight"],
+                        )
+                    )
 
     results += [
         hist_mll,
@@ -1152,7 +1634,6 @@ def build_graph(df, dataset):
         hist_mu_neg_masspt,
         hist_cosThetaStarll,
         hist_phiStarll,
-        hist_ptll_vs_yll,
     ]
 
     return results, weightsum
