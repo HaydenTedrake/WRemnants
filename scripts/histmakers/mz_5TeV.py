@@ -16,6 +16,14 @@ parser.add_argument(
     "the physics histograms from such a run are NOT the analysis ones. Uses "
     "uncorrected kinematics, since corrected pt is undefined when a refit fails.",
 )
+parser.add_argument(
+    "--nanoVersion",
+    choices=["v9", "v15"],
+    default="v9",
+    help="5.02 TeV NanoAOD production for data AND MC (datasetDict_2017G "
+    "NANO_PROD_TAGS / NANO_DATA_TAGS). v15 (Oct 2026) adds the muon trigger "
+    "objects and the standalone-muon branches the in-situ efficiencies need.",
+)
 # ---- In-situ muon efficiencies (WRemnants PR #709) --------------------------
 # ID, trigger and isolation efficiencies floated in the fit as unconstrained
 # Chebyshev coefficients, measured from four categories of the dimuon sample
@@ -157,6 +165,7 @@ from wremnants.production import (
     generator_level_definitions,
     muon_efficiencies_insitu,
     muon_selections,
+    nanoaod_compat,
     systematics,
     theory_corrections,
 )
@@ -196,6 +205,7 @@ datasets = getDatasets(
     base_path=args.dataPath,
     era=args.era,
     oneMCfileEveryN=args.oneMCfileEveryN,
+    nanoVersion=args.nanoVersion,
 )
 
 import pickle
@@ -582,9 +592,16 @@ def define_insitu_muon_selection(df, dataset):
     )
     df = muon_selections.select_standalone_muons(df, dataset, False, "firstMuons")
     df = muon_selections.select_standalone_muons(df, dataset, False, "secondMuons")
-    # per-leg trigger match, OR of the two legs (HLT_HIMu17 via Era_2017G)
+    # per-leg trigger match, OR of the two legs. The HLT_HIMu17 muon objects are
+    # selected with the low-PU helper, as in mz_lowPU.py (TrigObj_id == 13 &&
+    # filterBits bit 0; needs the nano v15 trigger objects -- v9 has no muon ones)
     df = muon_selections.apply_triggermatching_muon(
-        df, dataset, "firstMuons", "secondMuons", era=args.era
+        df,
+        dataset,
+        "firstMuons",
+        "secondMuons",
+        goodTrigObjs="wrem::goodMuonTriggerCandidateLowPU(TrigObj_id, TrigObj_pt,"
+        " TrigObj_l1pt, TrigObj_l2pt, TrigObj_filterBits)",
     )
     df = df.Define("firstMuons_passID0", "Sum(goodMuons && firstMuons) == 1")
     df = df.Define("secondMuons_passID0", "Sum(goodMuons && secondMuons) == 1")
@@ -824,6 +841,8 @@ def book_insitu_effMC(df_2HLT, df_1HLT_passID, df_1HLT_failID, results):
 
 
 def build_graph(df, dataset):
+    # NanoAOD v15 stores several integer branches in narrower types than v9
+    df = nanoaod_compat.harmonize_nano_types(df)
     logger.info(f"build graph for dataset: {dataset.name}")
 
     results = []

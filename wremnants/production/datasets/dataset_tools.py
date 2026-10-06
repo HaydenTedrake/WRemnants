@@ -68,6 +68,22 @@ def getDatasets(
     logger.info(f"Loading samples from {base_path}.")
 
     module = importlib.import_module(f"wremnants.production.datasets.datasetDict_{era}")
+    # An era whose MC exists in several NanoAOD productions maps nanoVersion to
+    # exactly one production tag, so different productions are never mixed
+    # (the default multi-tag fallback below works per sample and would).
+    era_prod_tags = getattr(module, "NANO_PROD_TAGS", None)
+    if era_prod_tags is not None:
+        if nanoVersion not in era_prod_tags:
+            raise ValueError(
+                f"nanoVersion '{nanoVersion}' not available for era {era}; "
+                f"choose from {sorted(era_prod_tags)}"
+            )
+        mc_tags = [era_prod_tags[nanoVersion]]
+        logger.info(f"Era {era}: NanoAOD {nanoVersion} MC ({mc_tags[0]})")
+        era_data_tags = getattr(module, "NANO_DATA_TAGS", None)
+        if era_data_tags is not None:
+            data_tags = [era_data_tags[nanoVersion]]
+            logger.info(f"Era {era}: NanoAOD {nanoVersion} data ({data_tags[0]})")
     if extended:
         dataDict = getattr(module, "dataDict_extended", {})
         if len(dataDict) == 0:

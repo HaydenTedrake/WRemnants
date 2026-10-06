@@ -188,7 +188,11 @@ def _make_regularizer_class():
         """Hinge-loss penalty enforcing NP damping, per-side and per-form
         (tanh_2 / tanh_6); see the module docstring."""
 
-        def __init__(self, mapping, dtype):
+        def __init__(self, mapping, dtype, indata=None, smallb=None, margin=None):
+            # Newer rabbit (since the in-situ efficiency PR) passes indata= to
+            # every regularizer and routes the -r 'key=value' tokens HERE instead
+            # of to the mapping, so smallb/margin are accepted on both. A value
+            # given here wins; otherwise the mapping's (older rabbit) is used.
             super().__init__(mapping, dtype)
             self.dtype = dtype
             self.mapping = mapping
@@ -197,8 +201,22 @@ def _make_regularizer_class():
             # margin come from the mapping (margin default = NP_DAMPING_MARGIN).
             self.ymax = Y_MAX
             self.eps = LAMBDA_INF_FLOOR
+            if margin is not None:
+                mapping.margin = float(margin)
+            if smallb is not None:
+                mapping.smallb = str(smallb).strip().lower() not in (
+                    "0",
+                    "false",
+                    "no",
+                    "off",
+                )
             self.margin = float(getattr(mapping, "margin", NP_DAMPING_MARGIN))
             self.enforce_small_b = bool(getattr(mapping, "smallb", True))
+            print(
+                f"NPDampingWall: margin={self.margin:g} "
+                f"smallb={int(self.enforce_small_b)}",
+                flush=True,
+            )
 
             # Forms + λ order are DERIVED from the SCETlibNPParamModel that
             # published itself on the shared indata (built before this regularizer
@@ -258,7 +276,9 @@ def _make_regularizer_class():
                 )
             return resolved
 
-        def set_expectations(self, initial_params, initial_observables):
+        def set_expectations(self, initial_params, initial_observables, parms=None):
+            # parms (parameter names) is passed by newer rabbit; the flat layout
+            # check below already refuses a reordered/resized parameter block
             nsyst = len(self.indata.systs)
             self._nparams = int(initial_params.shape[0]) - nsyst
             if self._nparams != len(self._order):

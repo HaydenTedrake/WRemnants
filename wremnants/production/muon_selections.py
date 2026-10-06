@@ -323,11 +323,15 @@ def select_z_candidate(
 
 
 def apply_triggermatching_muon(
-    df, dataset, muon, otherMuon=None, era="2016PostVFP", idx=0
+    df, dataset, muon, otherMuon=None, era="2016PostVFP", idx=0, goodTrigObjs=None
 ):
+    # goodTrigObjs: optional C++ expression selecting the trigger objects to match
+    # to, for runs whose trigger is not covered by goodMuonTriggerCandidate<Era>
+    # (e.g. the low-PU wrem::goodMuonTriggerCandidateLowPU)
     df = df.Define(
         "goodTrigObjs",
-        f"wrem::goodMuonTriggerCandidate<wrem::Era::Era_{era}>(TrigObj_id,TrigObj_filterBits)",
+        goodTrigObjs
+        or f"wrem::goodMuonTriggerCandidate<wrem::Era::Era_{era}>(TrigObj_id,TrigObj_filterBits)",
     )
     if otherMuon is None:
         df = df.Filter(
