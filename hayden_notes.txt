@@ -1,14 +1,24 @@
 # Hayden notes
-Last updated: Oct 5 2026 evening (reorganized Oct 5; backup of the previous version:
-/work/submit/hayden17/13tev_oct3/hayden_notes_backup_20261005.txt)
+State as of Oct 7 2026. Code: branch setuprabbit_5tev @ 4f4040ae (pushed to the fork).
+Backups of earlier versions: /work/submit/hayden17/13tev_oct3/hayden_notes_backup_20261005.txt,
+/work/submit/hayden17/5tev_v15_insitu_oct6/hayden_notes_backup_20261007.txt
+
+WHERE THINGS STAND (Oct 7)
+  * 5 TeV inputs: nano v15 data + MC (--nanoVersion v15) is the production to use.
+  * Muon efficiencies: in-situ (PR #709) works end to end on v15 data + MC.
+    Blinded Asimov sigma(alpha_s) = 1.355e-3 with the param model OFF -- but see
+    the open question in section 6 before quoting it.
+  * The SCETlib-NP param model only takes ONE channel, so it cannot yet be combined
+    with the 4-channel in-situ card. Single-channel fits (no in-situ) can use it.
+  * 13 TeV: Luca's 260717 chain reproduced end to end (section 3).
 
 CONTENTS
   1. Setup
   2. Rules and gotchas that apply everywhere
   3. 13 TeV pipeline -- full description            (Luca's 260717 chain, Oct 3-5)
-  4. 5 TeV pipeline -- recipe                       (histmaker -> tensor -> fit -> plots)
+  4. 5 TeV pipeline -- recipe (single channel)     (histmaker -> tensor -> fit -> plots)
   5. Reference numbers
-  6. In-situ muon efficiencies, 5 TeV (PR #709)     <- current efficiency method
+  6. Nano v15 + in-situ muon efficiencies, 5 TeV  <- current state, recipe, results
   7. Topic notes
        7a. ptll < 44 (done Aug 6)
        7b. Plotting fit templates with rabbit_plot_hists.py
@@ -82,6 +92,12 @@ MISSING INPUTS ONLY WARN: the histmakers print a WARNING and carry on when a
 theory-correction or ByHelicity file is missing, then the downstream
 setupRabbit step fails (or worse, silently lacks a systematic). After any
 production, compare the histogram list against a reference output.
+Likewise getDatasets SILENTLY SKIPS a sample whose directory has no files: check
+the "Booking N of M files" lines in the histmaker log for every sample.
+
+ASIMOV CARD "DATA" IS MC: setupRabbit_5TeV.py stores the sum of all MC (scaled to
+the luminosity) as hdata_obs. Event counts read from a card are the MC
+expectation; real data counts come from the histmaker output.
 
 PLOTS:
   * Use savehists_jul30/plot_com.py <com> <rabbit_plot_hists args>, not
@@ -324,7 +340,7 @@ PROBLEMS HIT AND HOW THEY WERE SOLVED
    Harmless warnings that Luca's run has too: renesanceEW_CorrZ and the *_CorrW
    files (W corrections, W is a tiny background here), PDF weights for dibosons.
 2. rabbit API change (code fix in
-   wremnants/postprocessing/scetlib_np/np_damping_wall.py, UNCOMMITTED as of Oct 5).
+   wremnants/postprocessing/scetlib_np/np_damping_wall.py, committed in 4f4040ae).
    The PR #709 merge moved rabbit to 9a84645, which (a) passes indata= to every
    regularizer, (b) hands the -r key=value tokens (smallb=1 margin=0) to the
    REGULARIZER instead of the mapping, (c) calls set_expectations(..., parms=).
@@ -363,36 +379,46 @@ resumNonpert 0.30). Luca has no Asimov fit with this configuration. A data fit
 was deliberately not run (blinded-Asimov rule; the card already matches his).
 
 -------------------------------------------------------------------------------
-MAPPING TO 5 TeV WITH IN-SITU EFFICIENCIES (see section 6)
+MAPPING TO 5 TeV (see sections 4 and 6)
 -------------------------------------------------------------------------------
-  13 TeV                          5 TeV
-  --                              pass 0: mz_5TeV.py --makeInsituEffMC, then
-                                          make_insitu_effMC.py -> effMC file
-  mz_dilepton.py                  mz_5TeV.py --insituEffMCFile <effMC>  (4 channels)
-  setupRabbit.py                  setupRabbit_5TeV.py --muonInsituEfficiency --insituEffMCFile <effMC>
-  fit stage A -> stage B          the same, -t -1, plus the COM5 param-model tokens
+  13 TeV (this section)           5 TeV, single channel (sec 4)   5 TeV, in-situ (sec 6)
+  --                              --                               pass 0 + make_insitu_effMC.py
+  mz_dilepton.py                  mz_5TeV.py --nanoVersion v15     mz_5TeV.py --nanoVersion v15
+                                                                     --insituEffMCFile <effMC>
+  setupRabbit.py                  setupRabbit_5TeV.py              setupRabbit_5TeV.py
+                                    --scetlibNPParamModel            --muonInsituEfficiency
+                                                                     (NO param model)
+  fit stage A -> stage B          the same, + COM5 tokens          ONE stage: rabbit_fit.py -t -1
+                                                                     --doImpacts
 Luca's 13 TeV chain uses the external smooth SFs, NOT the in-situ method, so it
 exercises the overall flow but not the in-situ part.
 
 
 ===============================================================================
-4. 5 TeV PIPELINE -- RECIPE
+4. 5 TeV PIPELINE -- RECIPE (single channel)
 ===============================================================================
-Plots of the last full run: https://submit.mit.edu/~hayden17/aug10/
+This is the default selection with ONE fit channel (ptll x yll), so the SCETlib-NP
+param model can be used. For the in-situ efficiencies (4 channels, no param model)
+use section 6 instead. Plots of the last param-model run (v9 inputs):
+https://submit.mit.edu/~hayden17/aug10/
 
 -------------------------------------------------------------------------------
-4.1 HISTMAKER                                   sbatch 96G/16cpu or login node, ~10 min
+4.1 HISTMAKER                                   sbatch 64G/32cpu or login node, ~4 min
 -------------------------------------------------------------------------------
   python scripts/histmakers/mz_5TeV.py \
-    --dataPath /scratch/submit/cms/wmass/NanoAOD/ \
+    --dataPath /scratch/submit/cms/wmass/NanoAOD/ --nanoVersion v15 \
     --theoryCorr scetlib_dyturbo_LatticeNP_CT18Z_N3p0LL_N2LO{,_pdfas,_pdfvars} \
     --muonCorr scarekit \
     --helicityXsecsFile wremnants-data/data/w_z_helicity_xsecs_5TeV.hdf5 \
-    -j 16
+    -j 32
   -> mz_5TeV_scetlib_dyturbo_LatticeNP_CT18Z_N3p0LL_N2LO_Corr.hdf5   (~10 MB)
-  Compute is ~8-10 min (build graphs 77 s, lumi 11 s, event loop 454 s for 882M
-  events at -j 16). When the queue is long, run it on the login node under
-  setsid, as run_production_jul14_backgrounds.sh does (peak RSS 52 GB).
+  --nanoVersion v15 (Oct 2026 reproduction) is the production to use; v9 is the
+  default only so that old commands keep their meaning. Physics is identical
+  (sigma(alpha_s) 1.4929 vs 1.4933, section 6), but only v15 has the muon trigger
+  objects the in-situ method needs.
+  Measured Oct 6 (v15, -j 32): 882M events in 3.6 min. When the queue is long, run
+  it on the login node under setsid, as run_production_jul14_backgrounds.sh does
+  (peak RSS ~52 GB at -j 16).
   mz_5TeV.py --help shows only the FIRST-STAGE parser, so --muonCorr etc. are
   missing from the help text but work.
   Efficiency options: in-situ (section 6) or the superseded external SFs (section 8).
@@ -404,7 +430,9 @@ Plots of the last full run: https://submit.mit.edu/~hayden17/aug10/
     mz_5TeV_scetlib_dyturbo_LatticeNP_CT18Z_N3p0LL_N2LO_Corr.hdf5 \
     -o /work/submit/hayden17/<dir>/ --outname <tensor> \
     --histName ptll_vs_yll --scetlibNPParamModel --ptllMax 44
-  CHECK: "39 ptll bins x 10 yll", ~85k events, ~273 systs (no efficiencies).
+  CHECK: "39 ptll bins x 10 yll", Asimov expectation ~85.2k events (v15 85,209;
+  v9 85,218), ~273 systs with --scetlibNPParamModel (279 without it: the fixed NP
+  variations stay in), no efficiencies.
   Useful flags: --lumiScale (7c), --factorizeSystAxes (7g), --pseudoData (bias tests),
   --muonInsituEfficiency (section 6).
 
@@ -553,11 +581,16 @@ Plots of the last full run: https://submit.mit.edu/~hayden17/aug10/
 ===============================================================================
 Always compare like with like (param model on/off, efficiencies on/off, Asimov/data).
 
-  5 TeV  ptll<44, param model ON,  eff off ...... 3.04  (3.0449)  <- standard reference
-         (2.99 including the 44-100 bin)
-  5 TeV  param model OFF, eff off ............... 1.4933
-         param model OFF, external-SF eff ON .... 1.7547  (do not quote, section 8)
-         1D ptll only, param model OFF ........... 3.1271
+  5 TeV, blinded Asimov, ptll<44:
+    param model ON,  v9, default selection ............ 3.04 (3.0449)  param-model reference
+                     (2.99 including the 44-100 bin)
+    param model OFF, v9,  default selection ........... 1.4933
+    param model OFF, v15, default selection ........... 1.4929  (v9 -> v15: no change)
+    param model OFF, v15, in-situ selection, ch0 only . 1.5428  (tighter selection, no effs)
+    param model OFF, v15, in-situ, 4 channels ......... 1.3545  CURRENT efficiency method;
+                     do not quote before the section 6 open question is answered
+    param model OFF, v9, external-SF eff (superseded) . 1.7547  (do not quote, section 8)
+    1D ptll only, param model OFF, v9 ................. 3.1271
   13 TeV 0.3/fb  2D, Asimov ..................... 3.93    -> 5 TeV 23% better at equal lumi
   13 TeV 16.8/fb 2D, Asimov (Oct 5, section 3) .. 2.137
   13 TeV 16.8/fb 2D, DATA (Luca's 260717) ....... 1.00    (-t 0, not comparable to Asimov)
@@ -566,142 +599,222 @@ The param model roughly DOUBLES sigma(alpha_s) at the Asimov point.
 
 
 ===============================================================================
-6. IN-SITU MUON EFFICIENCIES, 5 TeV (WRemnants PR #709)        (Oct 2 2026)
+6. NANO v15 + IN-SITU MUON EFFICIENCIES, 5 TeV (WRemnants PR #709)
 ===============================================================================
-THIS IS THE IMPLEMENTATION WE FOLLOW NOW. Commit eedc666c on setuprabbit_5tev
-(pushed to the fork). The external-SF chain (section 8) is superseded; its code
-is kept and is still the default when no in-situ flag is given (the two modes
-refuse to run together).
+STATUS (Oct 7)
+  The in-situ method runs end to end on nano v15 data + MC (blinded Asimov).
+  Code: in-situ port eedc666c; v15 support, low-PU trigger matching and the
+  damping-wall fix 4f4040ae. In-situ fits run with the param model OFF (it only
+  takes one channel). Latest run and its controls:
+    /work/submit/hayden17/5tev_v15_insitu_oct6/   STATUS.txt, SUMMARY.txt,
+    controls/SUMMARY_controls.txt
+  Result 1.355e-3, but it must not be quoted before open question 1 below.
+  The external-SF method (section 8) is superseded; its code is still the default
+  when no in-situ flag is given, and the two modes refuse to run together.
 
-NANO v15 (Oct 5 2026): the advisor reproduced the 5.02 TeV MC as nano v15 in
-/scratch/submit/cms/wmass/NanoAOD/<sample>/NanoV15MCLowPU5TeV_v1/ with a newer
-framework ("physics ~the same, branch names may differ"; branch lists per version:
-https://cms-xpog.docs.cern.ch/autoDoc/). Select it with
-  mz_5TeV.py --nanoVersion v15        (default v9; datasetDict_2017G.NANO_PROD_TAGS)
-Exactly one production is used for all MC -- never a per-sample mix. Missing
-samples are SILENTLY skipped by getDatasets: check the "Booking" lines.
-  * Muon TrigObj now exist, in data AND MC: only in HLT_HIMu17 events, all with
-    filterBits == 1, pt >= 17.0, matching every good offline muon (dR<0.3).
-    TRIGGER MATCHING uses the low-PU helper, as mz_lowPU.py does (David's pointer):
-      wrem::goodMuonTriggerCandidateLowPU(TrigObj_id, TrigObj_pt, TrigObj_l1pt,
-          TrigObj_l2pt, TrigObj_filterBits)     (lowpu_utils.hpp: id 13 && bit 0)
-    passed to muon_selections.apply_triggermatching_muon(..., goodTrigObjs=...).
-    (My earlier Era_2017G branch in utils.hpp/defines.hpp was removed again.)
-    CONFIRMED by the branch documentation (David, Oct 6): the TrigObj_filterBits
-    title lists the bit meaning per object type, and for muons it is
-    "0 => Mu17 for Muon". To read it: open a file in ROOT and Events->Print(), or
-      uproot.open(f)["Events"]["TrigObj_filterBits"].title
-    Check this for any new production instead of inferring bits from the data.
-  * Standalone-muon, iso, HLT, LHE/PDF/scale/MEParam/prefiring weights: same names,
-    and the weight arrays have identical lengths and titles.
-  * MET_* -> PFMET_*, RawMET_* -> RawPFMET_* (not used by mz_5TeV.py).
+INPUTS: NANO v15 (David Walter's Oct 2026 reproduction, CMSSW_15_0_19_patch2)
+  MC    /scratch/submit/cms/wmass/NanoAOD/<sample>/NanoV15MCLowPU5TeV_v1/
+        (all 8 samples; DYJetsToMuMu 112 files, 76 GB)
+  DATA  /scratch/submit/cms/wmass/NanoAOD/SingleMuon/NanoV15Run2017GDataLowPU5TeV_v2/
+        (1397 files, 1.0 TB)
+  Selected with  mz_5TeV.py --nanoVersion v15  for data AND MC
+  (datasetDict_2017G NANO_PROD_TAGS / NANO_DATA_TAGS; getDatasets then uses exactly
+  one production, never a per-sample mix). The default is still v9.
+  Differences from v9 (branch lists per version: https://cms-xpog.docs.cern.ch/autoDoc/):
+  * Muon TrigObj exist (v9 had none), in data and MC, only in HLT_HIMu17 events,
+    with filterBits bit 0 = "Mu17 for Muon" -- confirmed from the branch
+    documentation (ROOT: Events->Print(); uproot: ["TrigObj_filterBits"].title).
+    Read that title for any new production instead of inferring bits from data.
+    All muon objects have pt >= 17.0 and match every good offline muon of the
+    fired events (dR < 0.3).
+  * Standalone-muon branches are now in the DATA too (the in-situ probes need them).
   * 14 integer branches changed TYPE (v12+ convention), e.g. Muon_nTrackerLayers
-    int -> uint8 ("Type ambiguity (want unsigned char, have int)"). Handled by
+    int -> uint8 ("Type ambiguity (want unsigned char, have int)").
     wremnants/production/nanoaod_compat.py harmonize_nano_types(), called first in
-    build_graph: redefines them to the v9 types only when they differ (no-op on v9).
-  * Smoke tests on v15 Ztautau (5 files): default mode runs (53 hists); in-situ
-    pass 0 fills ALL FOUR categories with real trigger matching for the first time.
-STATUS (Oct 6): ALL v15 samples are on /scratch, data included.
-  MC    <sample>/NanoV15MCLowPU5TeV_v1   (DYJetsToMuMu: 112 files, 76 GB)
-  DATA  SingleMuon/NanoV15Run2017GDataLowPU5TeV_v2   (1397 files, 1.0 TB)
-  --nanoVersion v15 switches data AND MC (datasetDict_2017G NANO_PROD_TAGS /
-  NANO_DATA_TAGS); the v15 data has the standalone-muon branches too.
-  SMOKE TEST Oct 6 (in-situ mode, 3 files each, real trigger matching):
-                  nominal   failIso   failHLT   failID
-     data           172        3        14        3
-     Zmumu MC     70319     1305      6064      810
-  failHLT/nominal ~8% in data vs 8.6% in MC; effMCprobe_* filled.
-NEXT: in-situ pass 0 on all v15 Zmumu (--nanoVersion v15 --makeInsituEffMC
---filterProcs Zmumu) -> make_insitu_effMC.py -> pass 1 on everything
-(--insituEffMCFile) -> setupRabbit_5TeV.py --muonInsituEfficiency
---insituEffMCFile ... -> fit stages A/B (-t -1).
-HOW TO TRACK THE PRODUCTION (readable without his grid proxy):
-  David produces with CRAB (CMSSW_15_0_19_patch2) -> EOS
-  /store/group/cmst3/group/wmass/w-mass-13TeV/NanoAOD, then copies each finished
-  sample to /scratch with /work/submit/david_w/ZMass/prod_nanoV15/transfer_nanoV15_5TeV.sh
-  (logs in .../prod_nanoV15/transfer_logs/; "OK ... EOS N files | scratch N files").
-  Latest `crab status` of each task is in
-    /work/submit/david_w/ZMass/prod_nanoV15/CMSSW_15_0_19_patch2/src/Configuration/
-      WMassNanoProduction/crab_submit/crab_projects/crab_<sample>_*/crab.log
-  (grep -n "Jobs status:" and read the lines after the last one). Failed jobs go
-  into recovery tasks *_rec1, _rec2, ... before he copies a sample.
-  As of Oct 5 21:51 EDT:
-    DYJetsToMuMu   109/111 finished; recovery rec1: 3/3 running
-    SingleMuon     v2 1317/1325 finished; rec1 50/50, rec2 20/20 done; rec3 8/10
-                   done, 2 running. Output dataset tag NanoV15Run2017GDataLowPU5TeV_v1
-                   (the first attempt, v1, failed 90%: a crash he reproduced and fixed)
-  Wplusmunu took ~6 h from its recovery task to being copied.
-  When the data lands: its directory differs from the MC tag, so datasetDict_2017G
-  SingleMuon_2017G needs the v15 path (data is NOT switched by --nanoVersion yet).
-NEXT once DYJetsToMuMu lands: in-situ pass 0 on v15 Zmumu (--nanoVersion v15
---makeInsituEffMC --filterProcs Zmumu) -> make_insitu_effMC.py -> pass 1 on all MC
--> setupRabbit_5TeV.py --muonInsituEfficiency -> fit stages A/B (-t -1). With MC
-only the efficiencies are unconstrained by data, so this validates the chain and
-the effMC, not the measurement.
+    mz_5TeV.py build_graph, redefines them to the v9 types when they differ.
+  * MET_* -> PFMET_*, RawMET_* -> RawPFMET_* (not used by mz_5TeV.py).
+  * Everything else used is identical (names; weight arrays same length and titles).
+  Physics check: the same selection and fit on v9 and v15 give 1.4933 vs 1.4929.
+  Tracking a production (readable without a grid proxy): David runs CRAB -> EOS
+  /store/group/cmst3/group/wmass/w-mass-13TeV/NanoAOD, then copies finished samples
+  to /scratch with /work/submit/david_w/ZMass/prod_nanoV15/transfer_nanoV15_5TeV.sh
+  (logs .../prod_nanoV15/transfer_logs/: "OK ... EOS N files | scratch N files").
+  Each task's latest `crab status` is in .../prod_nanoV15/CMSSW_15_0_19_patch2/src/
+  Configuration/WMassNanoProduction/crab_submit/crab_projects/crab_<sample>_*/crab.log
+  (grep -n "Jobs status:"; failed jobs are rerun as recovery tasks *_rec1, _rec2...).
 
-Method: ID / HLT / Iso floated in the fit as UNCONSTRAINED Chebyshev
-coefficients (48 eta x 4 pt [x 3 uT]; 2112 nuisances effInsituID/HLT/Iso_*,
-same names as 13 TeV), from four categories of the Z->mumu sample:
-  tag = passID && trigger-matched
-  2HLT (both tags, probe picked by isEvenEvent):
-     probe passIso -> ch0      NOMINAL (ptll x yll), the alpha_s channel
-     probe failIso -> failIso  (eta, pt, recoUT)
-  1HLT (exactly one tag; the other leg is the probe):
-     probe passID  -> failHLT  (eta, pt, recoUT, charge)
-     probe failID  -> failID   (eta, pt, charge)
-Every systematic is booked per channel. Reco/tracking stay external (no 2017G
-reco/tracking map yet -> not applied). Iso = Muon_pfRelIso04_all < 0.15
-(--isolationDefinition iso04; vtxAgn is MC-only at 5 TeV).
-NB the signal region CHANGES: both muons pt > 26, trigger-matched, ID'd, and
-the probe isolated (old: pt > 18, mediumId && isGlobal, no iso).
+METHOD
+  ID / HLT / Iso are floated in the fit as UNCONSTRAINED Chebyshev coefficients
+  (48 eta x 4 pt [x 3 uT]; 2112 nuisances effInsituID/HLT/Iso_*, same names as
+  13 TeV), measured from four categories of the Z->mumu sample:
+    tag = passID && trigger-matched (wrem::goodMuonTriggerCandidateLowPU, the
+          low-PU helper mz_lowPU.py uses: TrigObj id 13 && bit 0)
+    2HLT (both legs tags; probe picked by isEvenEvent):
+       probe passIso -> ch0      NOMINAL (ptll x yll), the alpha_s channel
+       probe failIso -> failIso  (eta, pt, recoUT)
+    1HLT (exactly one tag; the other leg is the probe):
+       probe passID  -> failHLT  (eta, pt, recoUT, charge)
+       probe failID  -> failID   (eta, pt, charge)
+  Every systematic is booked in every channel (as in PR #709). Reco/tracking are
+  not applied (PR keeps them external; no 2017G map). Iso = Muon_pfRelIso04_all <
+  0.15 (--isolationDefinition iso04; vtxAgn is MC-only at 5 TeV).
+  The signal region is tighter than the default selection: both muons pt > 26,
+  trigger-matched, 13 TeV ID, probe isolated (default: pt > 18, mediumId &&
+  isGlobal, no iso).
 
-CHAIN (histmaker flags as in mz_dilepton.py):
-  0. python scripts/histmakers/mz_5TeV.py <usual flags> --makeInsituEffMC \
-       --filterProcs Zmumu
-     python scripts/corrections/make_insitu_effMC.py -i <out.hdf5> \
-       --outpath <dir> -p 5TeV          -> insitu_effMC_5TeV_Zmumu.pkl.lz4
-  1. python scripts/histmakers/mz_5TeV.py <usual flags> \
-       --insituEffMCFile <dir>/insitu_effMC_5TeV_Zmumu.pkl.lz4
-     python scripts/rabbit/setupRabbit_5TeV.py <out.hdf5> --histName ptll_vs_yll \
-       --ptllMax 44 --scetlibNPParamModel --muonInsituEfficiency \
-       --insituEffMCFile <same effMC>
-     fit stage A -> stage B, -t -1 (blinded Asimov, as always)
-  n. iterate: make_insitu_effSF.py on the fit -> rerun the histmaker with
-     --insituSFFile <theta_central>, setupRabbit_5TeV.py with the same
-     --insituSFFile, until max|delta*n_hat| -> 0.
-     (make_insitu_effSF_from_tnp.py can instead project an existing external TnP
-     SF onto the same basis, as a starting point.)
+RECIPE (exactly what ran; scripts step1..6 + submit_chain.sh in
+  /work/submit/hayden17/5tev_v15_insitu_oct6/, queued as dependent SLURM jobs)
+  PROD = --dataPath /scratch/submit/cms/wmass/NanoAOD/ --nanoVersion v15 -j 32
+         --theoryCorr scetlib_dyturbo_LatticeNP_CT18Z_N3p0LL_N2LO{,_pdfas,_pdfvars}
+         --muonCorr scarekit
+         --helicityXsecsFile wremnants-data/data/w_z_helicity_xsecs_5TeV.hdf5
+  1. pass 0  python scripts/histmakers/mz_5TeV.py $PROD --makeInsituEffMC \
+               --filterProcs Zmumu -o <dir>/pass0 --postfix pass0     32cpu/64G, 3 min
+  2. effMC   python scripts/corrections/make_insitu_effMC.py -i <pass0 .hdf5> \
+               --outpath <dir> -p v15    -> insitu_effMC_v15_Zmumu.pkl.lz4   seconds
+  3. pass 1  python scripts/histmakers/mz_5TeV.py $PROD \
+               --insituEffMCFile <effMC> -o <dir>/pass1 --postfix pass1   64cpu/128G, 5.5 min
+  4. card    python scripts/rabbit/setupRabbit_5TeV.py <pass1 .hdf5> -o <dir>/card \
+               --outname tensor_v15_insitu --histName ptll_vs_yll --ptllMax 44 \
+               --muonInsituEfficiency --insituEffMCFile <effMC>             1 min
+             NO --scetlibNPParamModel: SCETlibNPParamModel v1 raises for >1 channel.
+  5. fit     rabbit_fit.py <card> -t -1 --doImpacts -o <dir>/fit           43 s
+             One stage: the two-stage split of section 3 is only needed for the
+             param model's Hessian.
+  Wall clock ~20 min once nodes are free. CHECK: every sample "Booking ... of N
+  files" with tag NanoV15...; the "NanoAOD types harmonized" log line; fit edmval
+  ~1e-29.
+  Later, for data: iterate make_insitu_effSF.py on the fit -> histmaker
+  --insituSFFile <theta_central> -> setupRabbit_5TeV.py --insituSFFile, until
+  max|delta*n_hat| -> 0 (make_insitu_effSF_from_tnp.py can start from an external
+  TnP SF instead). Not run yet.
 
-CODE (from PR #709): wremnants/production/muon_efficiencies_insitu.py,
+CODE
+  From PR #709: wremnants/production/muon_efficiencies_insitu.py,
   include/muon_efficiencies_smooth.hpp (helper), systematics.py
   (add_muon_insitu_efficiency_hists), postprocessing/rabbit_helpers.py,
-  scripts/corrections/make_insitu_effMC.py / make_insitu_effSF.py; 5 TeV port in
-  scripts/histmakers/mz_5TeV.py and scripts/rabbit/setupRabbit_5TeV.py.
+  scripts/corrections/make_insitu_effMC.py / make_insitu_effSF.py.
+  5 TeV: scripts/histmakers/mz_5TeV.py (in-situ selection, 4 channels,
+  --nanoVersion), scripts/rabbit/setupRabbit_5TeV.py (--muonInsituEfficiency),
+  wremnants/production/nanoaod_compat.py, datasetDict_2017G.py, dataset_tools.py,
+  muon_selections.apply_triggermatching_muon(..., goodTrigObjs=...).
 
-VALIDATED Oct 2 (/work/submit/hayden17/eff_oct2/insitu_smoke/):
-  - default path bit-identical (histmaker 48 hists to 2e-15; tensor identical
-    up to group-index ORDER, i.e. Python set order)
-  - with a FAKE trigger (pt>17 and a pseudo-random 90% per leg, scratch copy,
-    never committed): pass 0 -> effMC (ID 0.992, trig 0.872, iso 0.943) ->
-    pass 1 -> 4-channel tensor (2130 params) -> blinded Asimov fit converges,
-    posdef Hessian, all coefficient sigmas finite.
-    With trigger eff = 1 the fit is singular (ID degenerate with HLT because
-    failHLT is empty) -- expected, and a useful check once real TrigObjs exist.
+RESULTS (Oct 6, v15, blinded Asimov, traditional impacts, alpha_s x10^-3)
+  effMC (v15 Zmumu): ID mean 0.995, trigger 0.948, iso 0.958; 78 / 25 empty
+    corner cells (trigger / iso).
+  Real data counts (pass-1 histograms):
+    nominal 63354, failIso 1579, failHLT 6270, failID 1007
+    (the card's Asimov expectation, ptll<44: 63772 / 1218 / 5537 / 703)
+  Data/MC fail fractions (fail/nominal): HLT 9.9% vs 8.5%, Iso 2.5% vs 1.9%,
+    ID 1.6% vs 1.1% -> data efficiencies are below MC in every category, which is
+    what the in-situ scale factors absorb.
+  Backgrounds in this selection: Ztautau ~0.03% of Zmumu, W negligible.
+  4-channel fit: Total 1.355 | theory 1.13 | resumNonpert 0.83 | experiment 0.66 |
+    resumTNP 0.62 | lumi 0.61 | theory_ew 0.51 | PDF 0.47 | stat 0.37 |
+    muonInsituEff 0.27 (HLT 0.20, ID 0.14, Iso 0.12)
+  DECOMPOSITION (same code, param model OFF, ptll<44):
+                                         Total   stat  lumi  theory resNP  PDF
+    R_v9   v9,  default selection        1.4933  0.320 0.724 1.256  0.938  0.661
+    R_v15  v15, default selection        1.4929  0.320 0.723 1.255  0.938  0.661
+    R_sel  v15, in-situ sel., ch0 only   1.5428  0.376 0.735 1.296  0.979  0.653
+    R_full v15, in-situ, 4 channels      1.3545  0.367 0.611 1.128  0.832  0.471
+  * v9 with today's code reproduces the July reference 1.4933 exactly.
+  * v9 -> v15: -0.03%, the reprocessing changes no physics.
+  * in-situ signal region: +3.3% (stat 0.320 -> 0.376, ~27% fewer events).
+    R_sel has NO efficiency uncertainty at all, so it is an optimistic baseline.
+  * adding the 3 fail channels with floating efficiencies: -12.2%, although the
+    efficiencies themselves cost 0.27 in quadrature. The gain is in lumi, theory
+    and especially PDF -> see open question 1.
 
-OPEN QUESTIONS FOR THE ADVISOR
-  1. (ANSWERED Oct 6: v15 data delivered, with muon TrigObj bit 0 and the
-     standalone branches. Trigger objects selected with David's low-PU helper.)
-  3. Isolation: the method needs an iso cut, 5 TeV had none. pfRelIso04_all < 0.15
-     used (vtxAgn exists only in MC) -- right choice, or add vtxAgn to data?
-  4. Signal region change (pt>26 both legs, trigger-matched, 13 TeV ID, isolated
-     probe): ~15% fewer events (stat x1.08) from the 26 GeV cut alone. Accepted, or
-     lower the window for 5 TeV?
-  5. Reco/tracking: kept external by the PR, but no 2017G map -> none applied.
+VALIDATION HISTORY
+  Oct 2 (/work/submit/hayden17/eff_oct2/insitu_smoke/): the default path stayed
+  bit-identical after the port (histmaker to 2e-15, tensor identical up to
+  group-index order). Before muon TrigObj existed, a FAKE trigger in a scratch copy
+  (never committed) ran pass 0 -> pass 1 -> 4-channel card -> converged fit; with
+  trigger efficiency = 1 that fit is singular (ID degenerate with HLT, failHLT
+  empty), as expected.
+
+BEFORE ANY REAL-DATA FIT: THE IN-SITU BOUND AND THE SHARED REGULARIZATION STRENGTH
+--------------------------------------------------------------------------------
+What the bound is: rabbit's InSituEfficiencyBound (rabbit/rabbit/regularization/
+insitu.py), turned on with  -r InSituEfficiencyBound  (no mapping tokens). The
+in-situ coefficients are UNCONSTRAINED, so nothing in the likelihood stops the
+implied data efficiency u = eMC x SF from leaving (0, 1) in corners of the
+pt/uT window where data constrain little. At u >= 1 the fail probability is
+negative, i.e. the model is undefined there. The bound adds, per efficiency cell,
+  relu((failFloor - f_fail)/failWidth)^2 + relu((passFloor - f_pass)/passWidth)^2
+with f_fail = (1 - u)/(1 - eMC) and f_pass = SF, i.e. the scale factors may not
+shrink a fail category below 5% of its MC prediction or a pass category below
+50%. Defaults: failFloor 0.05, failWidth 0.02, passFloor 0.5, passWidth 0.1.
+It reads the efficiency grid from the 'insitu_efficiency_bound' auxiliary that
+setupRabbit_5TeV.py --insituEffMCFile writes (with --insituSFFile on later
+iterations, so the bound acts on the TOTAL scale factor).
+
+Why it is off in the Asimov runs: at the Asimov point every coefficient is 0, so
+SF = 1, f_fail = f_pass = 1, both hinges are exactly 0 and so is their curvature.
+It cannot change an Asimov result. In a data fit the coefficients move, so it
+should be on.
+
+The problem: rabbit has ONE strength for ALL regularizers. Every penalty is
+multiplied by exp(2*tau), tau = --regularizationStrength (rabbit fitter.py).
+  * The bound's widths are tuned for rabbit's default tau = 0, i.e. weight 1:
+    a cell one width past its floor costs 1 unit of -lnL.
+  * The damping wall uses tau = 5.0 (Luca's 260717 value): weight exp(10) = 22026.
+  * With both on, the bound also gets 22026 -- equivalent to making its widths
+    exp(5) = 148x narrower (failWidth 0.02 -> 0.00013). That is effectively a hard
+    wall, which the bound was designed NOT to be (its docstring: bounded curvature,
+    "discourages rather than forbids", to keep the trust-region solver well
+    conditioned). It would push the minimizer hard against any cell that grazes
+    a floor and could damage convergence.
+  * Lowering tau to suit the bound would instead weaken the damping wall away from
+    Luca's configuration. So neither single tau is right for both.
+
+Options:
+  A. (no code change, recommended) keep tau = 5.0 for the wall and widen the
+     bound's widths by exp(tau), which cancels the shared factor EXACTLY:
+     penalty ~ exp(2 tau) * (x / w)^2, so w -> w * exp(tau) gives back (x / w)^2.
+       -r InSituEfficiencyBound failWidth=2.968 passWidth=14.84
+     (0.02 * 148.41, 0.1 * 148.41; recompute if tau changes; if the bound's
+     'smooth' option is ever used, scale it by exp(-tau) as well).
+     Pass the wall's -r as before; rabbit accepts several -r.
+  B. give rabbit a per-regularizer strength (a code change to shared rabbit code;
+     cleaner long-term, ask David since the bound is his).
+  C. drop the wall in data fits -- not acceptable, it departs from Luca's setup.
+  Also needed for data, independent of this: open questions 1-4 below (theory in
+  the fail channels, fakes, calibration in the fail channels, multi-channel param
+  model).
+
+OPEN QUESTIONS (for Luca / David), most important first
+  1. Should the fail channels constrain THEORY? Every systematic is booked in
+     every channel (as in PR #709), so failIso/failHLT/failID -- binned in probe
+     eta, pt, uT -- act as extra observables for the theory and PDF nuisances.
+     That is where the -12% comes from, and it is the mechanism of the 4D
+     angular-fit finding (section 7g): muon-kinematic acceptance structure. The
+     efficiency nuisances protect the efficiency part, not the theory part. Is
+     this intended at 13 TeV, and do they see a similar alpha_s gain there? Or
+     should the theory nuisances act only in ch0 (or be decorrelated per channel)?
+     Diagnostic not run yet: refit with theory/PDF only in ch0; if it returns to
+     ~1.54-1.56 the whole gain is theory information from the fail channels.
+     Do not quote 1.3545 as an improvement before this is settled.
+  2. Fakes / non-prompt background in the fail categories, above all failIso
+     (non-isolated probes). Not modelled at all (invisible in Asimov). PR #709 has
+     same-sign control regions for these categories (commit e5f359bb); they are not
+     ported (mz_5TeV.py refuses --sameSign in in-situ mode). Needed before data.
+  3. Muon scale/resolution variations are booked only in ch0, so the fail channels'
+     muon-pt shapes carry no calibration uncertainty. Needed?
+  4. Param model with several channels: SCETlibNPParamModel v1 is single-channel,
+     so in-situ fits cannot use it yet. Simplest extension: apply the lambda
+     reweighting to ch0 only and leave the fail channels at nominal.
+  5. Isolation: the method needs an iso cut, the 5 TeV analysis had none.
+     pfRelIso04_all < 0.15 used (vtxAgn exists only in MC). Right choice?
+  6. Signal-region cost, now measured: ~27% fewer events, stat 0.320 -> 0.376,
+     sigma +3.3% (R_v15 -> R_sel). Accepted, or lower the 26 GeV threshold at 5 TeV?
+  7. Reco/tracking: kept external by the PR, but no 2017G map, so none applied.
      Use the tag-free reco measurement of section 8, or is there a map?
-  6. Muon scale/resolution variations are booked only in the nominal channel
-     (control channels would need the probe pt recomputed). Needed?
-  7. PR #709 is not merged upstream yet (moving target). It also changes the 13 TeV
-     z_dilepton default --pt to [49, 26, 65] (see section 3, problem 4).
+  8. PR #709 is not merged upstream (moving target). It also changes the 13 TeV
+     z_dilepton default --pt to [49, 26, 65] (section 3, problem 4).
+  ANSWERED: v15 data with muon trigger objects and standalone branches (Oct 6);
+  muon filter bit 0 = "Mu17 for Muon" (David, Oct 6).
 
 
 ===============================================================================
@@ -903,14 +1016,19 @@ is acceptance-convolution structure, not physics:
     momentum-scale uncertainties are in, then revisit; --factorizeSystAxes is the
     lighter-weight A/B switch. Helicity smoothing becomes useful only if the fit
     moves to the finer 4D angular observables (half-MC test Jul 13: not needed in 2D).
+ 4. The same mechanism now shows up in the in-situ fit: its fail channels are
+    binned in muon kinematics and lower sigma(alpha_s) by 12% through the theory
+    and PDF nuisances (section 6, open question 1).
 
 
 ===============================================================================
 8. SUPERSEDED: EXTERNAL-SF MUON EFFICIENCIES, 5 TeV           (Sep-Oct 2026)
 ===============================================================================
 Replaced by the in-situ method (section 6). Kept because the code is still in the
-branch, the measurements are reusable (e.g. reco for open question 4), and the
-yll finding below is still an open physics question.
+branch (and is still what mz_5TeV.py --muonScaleFactors etc. run), the
+measurements are reusable (e.g. reco, section 6 open question 7), and the yll
+finding below is still an open physics question. Everything here used the v9
+NanoAOD.
 
 lowPU ('1HLT') parity throughout: per-muon maps, step names matching 13 TeV so
 the styles.py nuisance groups work, and the trigger combined with lowPU's own
@@ -984,8 +1102,8 @@ FILES
   /work/submit/hayden17/eff_oct2/run_chain.sh             stage-by-stage driver
 
 HOW THE PER-MUON TRIGGER WAS EXTRACTED (no trigger objects)
-TrigObj holds NO muon objects in this production (0 entries with id == 13 in
-5.16M events; only id 11). Muon_triggerIdLoose is an offline quality flag, NOT a
+TrigObj holds NO muon objects in the v9 production (0 entries with id == 13 in
+5.16M events; only id 11). (Nano v15 has them -- that is what section 6 uses.) Muon_triggerIdLoose is an offline quality flag, NOT a
 record that the muon fired; the L1_* branches are event-level. So no muon can be
 tagged. lowPU's combination formula read BACKWARDS extracts eps per muon from
 whether the EVENT fired, as a function of both muons' bins:
@@ -1083,8 +1201,5 @@ QUESTIONS THAT WERE FOR LUCA (moot for the in-situ method except 2)
   3. Eigenvector stat nuisances instead of lowPU's per-bin ones -- acceptable?
   4. Reusing the names reco/idip when the requirements differ (their reco adds
      highPurity + standalone cuts and a separate tracking step; their idip a dxybs cut).
-  5. Can the 5 TeV NanoAOD be reproduced with TrigObj filled? (now in progress)
-
-PLOTS of this method: ~/public_html/oct2/ (pre-efficiency), ~/public_html/oct2_eff/
-(efficiency-aware, 12 plots + prefit_muoneff_5tev; the grouped-impact PNG fails
-in Kaleido with error 525, the HTML is fine).
+  5. Can the 5 TeV NanoAOD be reproduced with TrigObj filled? ANSWERED: yes, nano
+     v15 (Oct 2026), section 6.
